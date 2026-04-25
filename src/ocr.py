@@ -140,6 +140,23 @@ def _choose_auto_engine(pdf_path: Path) -> tuple[str, str]:
         doc.close()
 
 
+def resolve_mode(pdf_path: Path, mode: str) -> tuple[str, str]:
+    """
+    Resolve OCR mode to a concrete engine and return (engine, reason).
+
+    For manual modes, returns the selected mode with a manual-selection reason.
+    For auto mode, returns the heuristic decision and rationale.
+    """
+    normalized = mode.lower().strip()
+    if normalized == "auto":
+        return _choose_auto_engine(pdf_path)
+    if normalized in {"marker", "mineru"}:
+        return normalized, "manual mode selected"
+    raise ValueError(
+        f"Unknown OCR mode: '{mode}'. Expected one of: marker, mineru, auto"
+    )
+
+
 def route(pdf_path: Path, mode: str = "auto", force: bool = False) -> list[Path]:
     """
     Route OCR execution to the appropriate engine.
@@ -168,7 +185,7 @@ def route(pdf_path: Path, mode: str = "auto", force: bool = False) -> list[Path]
         raise ValueError(f"Unsupported file type for OCR: {pdf_path.suffix or '<none>'}. Expected .pdf")
 
     if mode == "auto":
-        chosen_mode, reason = _choose_auto_engine(pdf_path)
+        chosen_mode, reason = resolve_mode(pdf_path, mode)
         print(f"Auto mode selected '{chosen_mode}' ({reason})")
         mode = chosen_mode
 

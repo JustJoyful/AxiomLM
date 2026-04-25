@@ -6,11 +6,11 @@ and a chat panel to interact with Gemma via Ollama using RAG.
 """
 
 import json
+import time
 from pathlib import Path
 from uuid import uuid4
 
 from httpx import Client, ConnectError, HTTPStatusError, ReadTimeout
-from rich.markdown import Markdown
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -76,16 +76,35 @@ class QueryComposer(TextArea):
         self.insert("\n")
 
 
+class SelectableResponse(TextArea):
+    """Read-only response body that supports text selection and copy."""
+
+    BINDINGS = [
+        Binding("ctrl+a", "select_all", show=False, priority=True),
+    ]
+
+    def __init__(self, text: str = "", classes: str | None = None) -> None:
+        super().__init__(
+            text=text,
+            read_only=True,
+            soft_wrap=True,
+            tab_behavior="focus",
+            show_line_numbers=False,
+            compact=True,
+            highlight_cursor_line=False,
+            classes=classes,
+        )
+
+
 class UserMessage(Static):
     """Styled chat block for user messages."""
 
     DEFAULT_CSS = """
     UserMessage {
-        margin: 1 2 0 6;
+        margin: 1 6 0 2;
         padding: 0 1;
-        border-right: tall ansi_cyan;
+        border-left: tall ansi_cyan;
         background: transparent;
-        text-align: right;
     }
 
     UserMessage .message-label {
@@ -134,6 +153,12 @@ class AssistantMessage(Static):
     }
     AssistantMessage .message-content {
         color: ansi_white;
+        border: none;
+        background: transparent;
+        margin: 0;
+        padding: 0;
+        height: auto;
+        min-height: 1;
     }
     """
 
@@ -148,7 +173,7 @@ class AssistantMessage(Static):
 
     def compose(self) -> ComposeResult:
         yield Label("", classes="message-label")
-        yield Static("", classes="message-content")
+        yield SelectableResponse("", classes="message-content")
 
     def on_mount(self) -> None:
         self._thinking_timer = self.set_interval(0.35, self._advance_thinking, pause=not self.thinking)
@@ -173,21 +198,21 @@ class AssistantMessage(Static):
         if not self.is_mounted:
             return
         label = self.query_one(".message-label", Label)
-        body = self.query_one(".message-content", Static)
+        body = self.query_one(".message-content", SelectableResponse)
 
         if self.thinking:
             suffix = "." * (self.dots % 4)
             label.update(f"AxiomLM{suffix}")
-            body.update("")
+            body.load_text("")
             return
 
         if self._is_error:
             label.update("AxiomLM Error")
-            body.update(self._content)
+            body.load_text(self._content)
             return
 
         label.update("AxiomLM")
-        body.update(Markdown(self._content))
+        body.load_text(self._content)
 
     def stream_token(self, token: str) -> None:
         if self._is_error:
@@ -373,8 +398,38 @@ class AxiomLMApp(App):
     }
 
     /* ── Utilities ─────────────────────────────────────────────────────── */
+    #parse_status_card {
+        margin: 0 1 1 1;
+        padding: 0 1;
+        border: round ansi_bright_black;
+        background: transparent;
+        height: auto;
+    }
+
+    #parse_status_title {
+        color: ansi_cyan;
+        text-style: bold;
+    }
+
+    #parse_status_stage {
+        color: ansi_bright_white;
+    }
+
+    #parse_status_engine {
+        color: ansi_bright_white;
+    }
+
+    #parse_status_eta {
+        color: ansi_bright_black;
+    }
+
+    #parse_status_detail {
+        color: ansi_bright_black;
+        text-style: italic;
+    }
+
     #parse_progress {
-        margin: 0 2 1 2;
+        margin: 0 1 1 1;
         background: transparent;
     }
     ProgressBar > .bar--bar {
@@ -402,6 +457,11 @@ class AxiomLMApp(App):
         self._pending_assistants: dict[str, AssistantMessage] = {}
         self._is_parsing = False
         self._parse_progress_timer: Timer | None = None
+        self._parse_started_at: float | None = None
+        self._parse_target_progress: float = 0.0
+        self._parse_current_stage: str = "Idle"
+        self._parse_current_engine: str = "-"
+        self._parse_detail: str = ""
         self._active_query_worker: Worker | None = None
         self._active_query_request_id: str | None = None
         self._cancelled_query_ids: set[str] = set()
@@ -427,7 +487,7 @@ class AxiomLMApp(App):
                 yield Input(placeholder="/path/to/book.pdf", id="pdf_path_input")
                 yield Select(
                     [
-                        ("Auto (Marker default)", "auto"),
+                        ("Auto (smart routing)", "auto"),
                         ("Marker (clean PDFs)", "marker"),
                         ("MinerU (scanned PDFs)", "mineru"),
                     ],
@@ -435,7 +495,13 @@ class AxiomLMApp(App):
                     value="auto",
                 )
                 yield Button("Parse + Index", id="parse_pdf_btn")
-                yield ProgressBar(total=100, show_percentage=False, show_eta=False, id="parse_progress", classes="hidden")
+                with Vertical(id="parse_status_card", classes="hidden"):
+                    yield Label("Parse / Index Status", id="parse_status_title")
+                    yield Label("Stage: Idle", id="parse_status_stage")
+                    yield Label("Engine: -", id="parse_status_engine")
+                    yield Label("ETA: --:--", id="parse_status_eta")
+                    yield Label("", id="parse_status_detail")
+                yield ProgressBar(total=100, show_percentage=True, show_eta=False, id="parse_progress", classes="hidden")
                 
                 yield Label("Loaded Books", classes="status_label")
                 yield Label("No books indexed.", id="empty_state", classes="hidden")
@@ -763,6 +829,7 @@ class AxiomLMApp(App):
         path_input = self.query_one("#pdf_path_input", Input)
         mode_select = self.query_one("#ocr_mode_select", Select)
         progress = self.query_one("#parse_progress", ProgressBar)
+        status_card = self.query_one("#parse_status_card", Vertical)
 
         parse_button.disabled = not enabled
         path_input.disabled = not enabled
@@ -775,19 +842,87 @@ class AxiomLMApp(App):
                 self._parse_progress_timer = None
             progress.add_class("hidden")
             progress.update(progress=0)
+            status_card.add_class("hidden")
+            self._parse_started_at = None
+            self._parse_target_progress = 0.0
+            self._parse_current_stage = "Idle"
+            self._parse_current_engine = "-"
+            self._parse_detail = ""
             return
 
+        status_card.remove_class("hidden")
         progress.remove_class("hidden")
-        progress.update(progress=2)
+        progress.update(progress=1)
+        self._set_parse_runtime_status(
+            stage="Preparing parse job",
+            detail="Setting up OCR pipeline...",
+            target_progress=8.0,
+        )
         self._parse_progress_timer = self.set_interval(0.35, self._tick_parse_progress)
 
+    def _format_duration(self, seconds: float) -> str:
+        total = max(0, int(seconds))
+        minutes, secs = divmod(total, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _set_parse_runtime_status(
+        self,
+        stage: str | None = None,
+        engine: str | None = None,
+        detail: str | None = None,
+        target_progress: float | None = None,
+    ) -> None:
+        if stage is not None:
+            self._parse_current_stage = stage
+        if engine is not None:
+            self._parse_current_engine = engine
+        if detail is not None:
+            self._parse_detail = detail
+        if target_progress is not None:
+            self._parse_target_progress = max(0.0, min(100.0, target_progress))
+
+        stage_label = self.query_one("#parse_status_stage", Label)
+        engine_label = self.query_one("#parse_status_engine", Label)
+        eta_label = self.query_one("#parse_status_eta", Label)
+        detail_label = self.query_one("#parse_status_detail", Label)
+
+        stage_label.update(f"Stage: {self._parse_current_stage}")
+        engine_label.update(f"Engine: {self._parse_current_engine}")
+        detail_label.update(self._parse_detail)
+
+        if self._parse_started_at is None:
+            eta_label.update("ETA: estimating...")
+
     def _tick_parse_progress(self) -> None:
+        if not self._is_parsing:
+            return
+
         progress = self.query_one("#parse_progress", ProgressBar)
         current = progress.progress if progress.progress is not None else 0
-        if current >= 95:
-            progress.update(progress=15)
+        target = min(100.0, max(current, self._parse_target_progress))
+
+        if current < target:
+            step = max(0.2, (target - current) * 0.16)
+            current = min(target, current + step)
+            progress.update(progress=current)
+        elif current < 99:
+            # Keep a subtle heartbeat so the UI feels alive during long operations.
+            progress.update(advance=0.05)
+            current = progress.progress if progress.progress is not None else current
+
+        eta_label = self.query_one("#parse_status_eta", Label)
+        if self._parse_started_at is None or current < 1:
+            eta_label.update("ETA: estimating...")
             return
-        progress.update(advance=4)
+
+        elapsed = max(0.1, time.monotonic() - self._parse_started_at)
+        remaining = max(0.0, (elapsed / current) * (100 - current))
+        eta_label.update(
+            f"Elapsed: {self._format_duration(elapsed)} · ETA: ~{self._format_duration(remaining)}"
+        )
 
     async def _start_parse_and_index(self) -> None:
         if self._is_parsing:
@@ -815,7 +950,20 @@ class AxiomLMApp(App):
         mode_value = str(mode_select.value) if mode_select.value and mode_select.value != Select.BLANK else "auto"
 
         self._is_parsing = True
+        self._parse_started_at = time.monotonic()
+        self._parse_target_progress = 8.0
         self._set_parse_controls_enabled(False)
+        requested_engine = {
+            "auto": "Auto (choosing best engine...)",
+            "marker": "Marker",
+            "mineru": "MinerU",
+        }.get(mode_value, mode_value)
+        self._set_parse_runtime_status(
+            stage="Preparing parse job",
+            engine=requested_engine,
+            detail=f"Book: {pdf_path.name}",
+            target_progress=8.0,
+        )
         await self._append_chat_widget(
             AssistantMessage(f"Starting parse + index for `{pdf_path.name}` using `{mode_value}` mode.")
         )
@@ -831,12 +979,43 @@ class AxiomLMApp(App):
     def _parse_and_index_worker(self, pdf_path: str, mode: str) -> None:
         try:
             from src.indexer import index_book
-            from src.ocr import route
+            from src.ocr import resolve_mode, route
 
             pdf = Path(pdf_path)
+            self.call_from_thread(
+                self._set_parse_runtime_status,
+                stage="Releasing GPU memory",
+                detail="Unloading Ollama sessions to free VRAM before OCR.",
+                target_progress=12.0,
+            )
             self._release_ollama_models()
-            pages = route(pdf, mode=mode, force=False)
+
+            resolved_mode, reason = resolve_mode(pdf, mode)
+            engine_label = "Marker" if resolved_mode == "marker" else "MinerU"
+            if mode == "auto":
+                engine_label = f"{engine_label} (auto)"
+            self.call_from_thread(
+                self._set_parse_runtime_status,
+                stage="Parsing PDF pages",
+                engine=engine_label,
+                detail=reason,
+                target_progress=72.0,
+            )
+
+            pages = route(pdf, mode=resolved_mode, force=False)
+            self.call_from_thread(
+                self._set_parse_runtime_status,
+                stage="Indexing chunks",
+                detail=f"Parsed {len(pages)} pages. Building embeddings...",
+                target_progress=96.0,
+            )
             chunks = index_book(pdf.stem, reindex=True)
+            self.call_from_thread(
+                self._set_parse_runtime_status,
+                stage="Finalizing",
+                detail=f"Indexed {chunks} chunks.",
+                target_progress=100.0,
+            )
             self.call_from_thread(self._finish_parse_and_index, pdf.stem, len(pages), chunks, "")
         except Exception as exc:
             detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
