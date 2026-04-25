@@ -1,0 +1,68 @@
+# Data — never commit PDFs, images, markdown, or the vector store
+data/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+!AxiomLM.png
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Downloaded model weights
+*.bin
+*.safetensors
+*.gguf
+*.pt
+*.pth
+
+# IDE configuration
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# AI coding tool traces
+.agent/
+.agents/
+.gemini/
+.gsd/
+.copilot-instructions*
+*.cursor
+.aider*
+.continue/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Auto-generated / Boilerplate
+GSD-STYLE.md
+PROJECT_RULES.md
+model_capabilities.yaml
+adapters/
+gsd-template/
+
+# Project Planning & CI/Copilot Logs
+PLAN.md
+IMPLEMENTATION_PLAN.md
+*copilot*
+.copilot/
