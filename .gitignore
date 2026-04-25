@@ -63,6 +63,8 @@ gsd-template/
 
 # Project Planning & CI/Copilot Logs
 PLAN.md
+ARCHITECTURE.md
+STACK.md
 IMPLEMENTATION_PLAN.md
 *copilot*
 .copilot/

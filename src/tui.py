@@ -38,17 +38,48 @@ from src.db import embed_query, get_collection, list_collections
 
 
 PROMPT_TEMPLATE = """You are a study assistant for engineering students.
-Answer ONLY using the provided context from the textbook.
-Do not use any prior knowledge. If the context does not contain the answer, say:
-"This topic is not covered in the loaded documents."
-Always cite your source at the end: [Source: {book} · {chapter} · p.{pages}]
-Be concise and precise.
-Use LaTeX notation for all equations: $...$ for inline, $$...$$ for display.
+
+Answer policy:
+1) Always answer the question directly.
+2) Use the provided context as your primary source.
+3) If context is incomplete or missing details, supplement with reliable general knowledge.
+4) If the question connects the PDF topic with outside concepts, explain that connection clearly.
+5) Never output a refusal-only response.
+6) Keep answers concise and precise.
+
+Source labeling:
+- If context was used, include: [Source: {book} · {chapter} · p.{pages}]
+- If any supplementation was used, append: [Supplemented from Researched knowledge]
+
+Use LaTeX notation for equations: $...$ inline, $$...$$ block.
 
 Context:
 {context}
 
 Question: {question}
+
+Answer:"""
+
+FALLBACK_PROMPT_TEMPLATE = """Answer this question directly using reliable general knowledge.
+Use context only if useful, and never refuse because context is incomplete.
+If relevant, relate the answer to the PDF topic.
+Be concise and factual.
+
+Question: {question}
+Context (optional):
+{context}
+
+Answer:"""
+
+ENFORCED_FALLBACK_PROMPT_TEMPLATE = """You must provide a best-effort answer to the question.
+Do not refuse, do not say context is missing, and do not say you cannot answer.
+If information is uncertain, state the uncertainty briefly and still provide the most likely explanation.
+If relevant, connect the answer to the PDF topic.
+Be concise and factual.
+
+Question: {question}
+Context (optional):
+{context}
 
 Answer:"""
 
@@ -160,12 +191,30 @@ class AssistantMessage(Static):
         height: auto;
         min-height: 1;
     }
+
+    AssistantMessage .message-telemetry {
+        display: none;
+        color: ansi_bright_black;
+        text-style: dim italic;
+        margin-top: 1;
+    }
+
+    AssistantMessage .message-telemetry.visible {
+        display: block;
+    }
     """
 
-    def __init__(self, content: str = "", thinking: bool = False, is_error: bool = False) -> None:
+    def __init__(
+        self,
+        content: str = "",
+        thinking: bool = False,
+        is_error: bool = False,
+        telemetry_badge: str | None = None,
+    ) -> None:
         super().__init__()
         self._content = content
         self._is_error = is_error
+        self._telemetry_badge = telemetry_badge or ""
         self._thinking_timer: Timer | None = None
         self.thinking = thinking
         if is_error:
@@ -174,6 +223,7 @@ class AssistantMessage(Static):
     def compose(self) -> ComposeResult:
         yield Label("", classes="message-label")
         yield SelectableResponse("", classes="message-content")
+        yield Label("", classes="message-telemetry")
 
     def on_mount(self) -> None:
         self._thinking_timer = self.set_interval(0.35, self._advance_thinking, pause=not self.thinking)
@@ -199,20 +249,31 @@ class AssistantMessage(Static):
             return
         label = self.query_one(".message-label", Label)
         body = self.query_one(".message-content", SelectableResponse)
+        telemetry = self.query_one(".message-telemetry", Label)
 
         if self.thinking:
             suffix = "." * (self.dots % 4)
             label.update(f"AxiomLM{suffix}")
             body.load_text("")
+            telemetry.update("")
+            telemetry.remove_class("visible")
             return
 
         if self._is_error:
             label.update("AxiomLM Error")
             body.load_text(self._content)
+            telemetry.update("")
+            telemetry.remove_class("visible")
             return
 
         label.update("AxiomLM")
         body.load_text(self._content)
+        if self._telemetry_badge:
+            telemetry.update(self._telemetry_badge)
+            telemetry.add_class("visible")
+        else:
+            telemetry.update("")
+            telemetry.remove_class("visible")
 
     def stream_token(self, token: str) -> None:
         if self._is_error:
@@ -223,12 +284,13 @@ class AssistantMessage(Static):
         self._content += token
         self._render_content()
 
-    def finalize(self, content: str, is_error: bool = False) -> None:
+    def finalize(self, content: str, is_error: bool = False, telemetry_badge: str | None = None) -> None:
         self._is_error = is_error
         if is_error:
             self.add_class("error")
         else:
             self.remove_class("error")
+        self._telemetry_badge = "" if is_error else (telemetry_badge or "")
         self._content = content
         self.thinking = False
         self._render_content()
@@ -691,35 +753,37 @@ class AxiomLMApp(App):
                 self.call_from_thread(self._finalize_query_cancelled, request_id)
                 return
 
-            if not results["documents"] or not results["documents"][0]:
-                self.call_from_thread(
-                    self._finalize_query,
-                    request_id,
-                    "No relevant content found. Try rephrasing your question.",
-                    True,
-                )
-                return
-
-            chunks = results["documents"][0]
-            metadatas = results["metadatas"][0]
-
             context_blocks = []
-            for chunk, meta in zip(chunks, metadatas):
-                h1 = meta.get("Header 1", "Unknown Chapter")
-                h2 = meta.get("Header 2", "Unknown Section")
-                page_info = meta.get("page", "N/A")
-                context_blocks.append(f"[{h1} · {h2} · p.{page_info}]\n{chunk}")
+            metadatas: list[dict] = []
+            has_retrieved_context = bool(results["documents"] and results["documents"][0])
+            if has_retrieved_context:
+                chunks = results["documents"][0]
+                metadatas = results["metadatas"][0]
+                for chunk, meta in zip(chunks, metadatas):
+                    h1 = meta.get("Header 1", "Unknown Chapter")
+                    h2 = meta.get("Header 2", "Unknown Section")
+                    page_info = meta.get("page", "N/A")
+                    context_blocks.append(f"[{h1} · {h2} · p.{page_info}]\n{chunk}")
 
-            prompt = PROMPT_TEMPLATE.format(
-                book=book_stem,
-                chapter=",".join(sorted({m.get("Header 1", "Unknown") for m in metadatas})),
-                pages=",".join(sorted({str(m.get("page", "?")) for m in metadatas})),
-                context="\n\n".join(context_blocks),
-                question=query,
-            )
+            if context_blocks:
+                prompt = PROMPT_TEMPLATE.format(
+                    book=book_stem,
+                    chapter=",".join(sorted({m.get("Header 1", "Unknown") for m in metadatas})),
+                    pages=",".join(sorted({str(m.get("page", "?")) for m in metadatas})),
+                    context="\n\n".join(context_blocks),
+                    question=query,
+                )
+            else:
+                prompt = ENFORCED_FALLBACK_PROMPT_TEMPLATE.format(
+                    question=query,
+                    context="",
+                )
 
             accumulated_response = ""
+            inference_badge: str | None = None
             was_cancelled = False
+            stream_started = time.monotonic()
+            stream_metrics: dict[str, object] = {}
             with Client(timeout=240.0) as client:
                 with client.stream(
                     "POST",
@@ -734,19 +798,76 @@ class AxiomLMApp(App):
                         if not line:
                             continue
                         data = json.loads(line)
+                        if data.get("done"):
+                            stream_metrics = data
                         token = data.get("response", "")
                         if token:
                             accumulated_response += token
-                            self.call_from_thread(self._stream_query_token, request_id, token)
 
             if was_cancelled:
                 self.call_from_thread(self._finalize_query_cancelled, request_id)
                 return
 
-            if not accumulated_response.strip():
-                accumulated_response = "I couldn't generate a response from the model."
+            inference_badge = self._build_inference_badge(
+                stream_metrics,
+                time.monotonic() - stream_started,
+            )
 
-            self.call_from_thread(self._finalize_query, request_id, accumulated_response, False)
+            used_general_knowledge = not context_blocks
+            if not accumulated_response.strip() or self._needs_general_knowledge_fallback(accumulated_response):
+                used_general_knowledge = True
+                fallback_prompt = FALLBACK_PROMPT_TEMPLATE.format(
+                    question=query,
+                    context="\n\n".join(context_blocks),
+                )
+                fallback_response, fallback_badge = self._run_non_stream_completion(
+                    model_name,
+                    fallback_prompt,
+                )
+                if fallback_response:
+                    accumulated_response = fallback_response
+                    inference_badge = fallback_badge or inference_badge
+
+            if not accumulated_response.strip() or self._needs_general_knowledge_fallback(accumulated_response):
+                used_general_knowledge = True
+                forced_response, forced_badge = self._run_non_stream_completion(
+                    model_name,
+                    ENFORCED_FALLBACK_PROMPT_TEMPLATE.format(
+                        question=query,
+                        context="\n\n".join(context_blocks),
+                    ),
+                )
+                if forced_response:
+                    accumulated_response = forced_response
+                    inference_badge = forced_badge or inference_badge
+
+            if not accumulated_response.strip():
+                accumulated_response = (
+                    "I couldn't generate a response right now. Please retry in a moment."
+                )
+
+            if used_general_knowledge:
+                accumulated_response = self._append_general_knowledge_tag(accumulated_response)
+
+            # Stream only the final response to avoid flashing an initial refusal.
+            chunk_size = 16
+            for idx in range(0, len(accumulated_response), chunk_size):
+                if self._is_query_cancelled(request_id):
+                    self.call_from_thread(self._finalize_query_cancelled, request_id)
+                    return
+                self.call_from_thread(
+                    self._stream_query_token,
+                    request_id,
+                    accumulated_response[idx : idx + chunk_size],
+                )
+
+            self.call_from_thread(
+                self._finalize_query,
+                request_id,
+                accumulated_response,
+                False,
+                inference_badge,
+            )
 
         except ConnectError:
             self.call_from_thread(
@@ -783,6 +904,84 @@ class AxiomLMApp(App):
 
     def _is_query_cancelled(self, request_id: str) -> bool:
         return request_id in self._cancelled_query_ids
+
+    def _needs_general_knowledge_fallback(self, response: str) -> bool:
+        normalized = response.strip().lower()
+        if not normalized:
+            return False
+        refusal_markers = (
+            "provided text does not contain",
+            "unable to answer this question from the given context",
+            "cannot answer from the given context",
+            "not covered in the loaded documents",
+            "insufficient context",
+            "given context does not",
+            "not enough information in the context",
+            "i do not have enough information",
+            "i don't have enough information",
+            "cannot answer that based on the provided context",
+            "can't answer that based on the provided context",
+            "the context does not provide",
+            "no relevant information provided",
+        )
+        return any(marker in normalized for marker in refusal_markers)
+
+    def _append_general_knowledge_tag(self, response: str) -> str:
+        tag = "[Supplemented from general knowledge]"
+        if tag.lower() in response.lower():
+            return response
+        stripped = response.rstrip()
+        if not stripped:
+            return tag
+        return f"{stripped}\n\n{tag}"
+
+    def _build_inference_badge(
+        self, payload: dict[str, object], elapsed_seconds: float | None = None
+    ) -> str | None:
+        def _to_positive_float(value: object) -> float | None:
+            if isinstance(value, bool):
+                return None
+            if not isinstance(value, (int, float)):
+                return None
+            number = float(value)
+            return number if number > 0 else None
+
+        eval_count_value = _to_positive_float(payload.get("eval_count"))
+        eval_duration_ns = _to_positive_float(payload.get("eval_duration"))
+        total_duration_ns = _to_positive_float(payload.get("total_duration"))
+
+        tokens_per_second: float | None = None
+        if eval_count_value is not None and eval_duration_ns is not None:
+            eval_seconds = eval_duration_ns / 1_000_000_000
+            if eval_seconds > 0:
+                tokens_per_second = eval_count_value / eval_seconds
+
+        total_seconds: float | None = None
+        if total_duration_ns is not None:
+            total_seconds = total_duration_ns / 1_000_000_000
+        elif elapsed_seconds is not None and elapsed_seconds > 0:
+            total_seconds = elapsed_seconds
+
+        if tokens_per_second is not None and total_seconds is not None:
+            return f"[ ⚡ {tokens_per_second:.1f} tokens/sec | ⏱️ {total_seconds:.1f}s total ]"
+        if tokens_per_second is not None:
+            return f"[ ⚡ {tokens_per_second:.1f} tokens/sec ]"
+        if total_seconds is not None:
+            return f"[ ⏱️ {total_seconds:.1f}s total ]"
+        return None
+
+    def _run_non_stream_completion(self, model_name: str, prompt: str) -> tuple[str, str | None]:
+        started = time.monotonic()
+        with Client(timeout=120.0) as client:
+            response = client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": model_name, "prompt": prompt, "stream": False},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        completion = str(payload.get("response", "")).strip()
+        telemetry_badge = self._build_inference_badge(payload, time.monotonic() - started)
+        return completion, telemetry_badge
 
     async def _stream_query_token(self, request_id: str, token: str) -> None:
         assistant = self._pending_assistants.get(request_id)
@@ -1108,16 +1307,35 @@ class AxiomLMApp(App):
         await self._finalize_assistant_message(request_id, message, is_error=True)
         self._clear_query_state(request_id)
 
-    async def _finalize_query(self, request_id: str, message: str, is_error: bool) -> None:
-        await self._finalize_assistant_message(request_id, message, is_error=is_error)
+    async def _finalize_query(
+        self,
+        request_id: str,
+        message: str,
+        is_error: bool,
+        telemetry_badge: str | None = None,
+    ) -> None:
+        await self._finalize_assistant_message(
+            request_id,
+            message,
+            is_error=is_error,
+            telemetry_badge=telemetry_badge,
+        )
         self._clear_query_state(request_id)
 
-    async def _finalize_assistant_message(self, request_id: str, message: str, is_error: bool) -> None:
+    async def _finalize_assistant_message(
+        self,
+        request_id: str,
+        message: str,
+        is_error: bool,
+        telemetry_badge: str | None = None,
+    ) -> None:
         assistant = self._pending_assistants.pop(request_id, None)
         if assistant is None or not assistant.is_attached:
-            await self._append_chat_widget(AssistantMessage(message, is_error=is_error))
+            await self._append_chat_widget(
+                AssistantMessage(message, is_error=is_error, telemetry_badge=telemetry_badge)
+            )
             return
-        assistant.finalize(message, is_error=is_error)
+        assistant.finalize(message, is_error=is_error, telemetry_badge=telemetry_badge)
         self.query_one("#chat_scroll", ScrollableContainer).scroll_end(animate=False)
 
     def _render_mascot(self) -> None:
