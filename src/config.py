@@ -32,3 +32,10 @@ TOP_K_RESULTS = 5      # top-k chunks retrieved per query
 # Minimum free VRAM (GB) before MinerU mode is allowed to proceed.
 # Below this threshold the script will pause and warn the user.
 MINERU_MIN_VRAM_GB = 4.5
+
+# ── OCR auto-routing heuristics ───────────────────────────────────────────────
+# In auto mode, OCR samples pages and chooses MinerU for scan-heavy PDFs.
+AUTO_OCR_SAMPLE_PAGES = 8
+AUTO_OCR_TEXT_CHAR_THRESHOLD = 180
+AUTO_OCR_IMAGE_COVERAGE_THRESHOLD = 0.45
+AUTO_OCR_SCANNED_PAGE_RATIO_THRESHOLD = 0.50

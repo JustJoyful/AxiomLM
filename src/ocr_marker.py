@@ -52,7 +52,13 @@ def run(pdf_path: Path, force: bool = False) -> list[Path]:
     # Run Marker on the full PDF
     print(f"  Running Marker on: {pdf_path.name} ...")
     converter = PdfConverter(artifact_dict=create_model_dict())
-    rendered = converter(str(pdf_path))
+    try:
+        rendered = converter(str(pdf_path))
+    except Exception as exc:
+        detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        raise RuntimeError(
+            f"Marker failed to open or parse '{pdf_path.name}': {exc.__class__.__name__}: {detail}"
+        ) from exc
     full_md: str = rendered.markdown
 
     # Split into pages on form-feed; fall back to single page if no \f present

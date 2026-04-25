@@ -108,7 +108,13 @@ def run(pdf_path: Path, force: bool = False) -> list[Path]:
     if resume_from >= 0 and not force:
         print(f"  Resuming from page {resume_from + 1} (pages 0–{resume_from} already done)")
 
-    doc = fitz.open(str(pdf_path))
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception as exc:
+        detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        raise RuntimeError(
+            f"MinerU failed to open '{pdf_path.name}': {exc.__class__.__name__}: {detail}"
+        ) from exc
     zoom = 200 / 72  # 200 DPI render
     mat = fitz.Matrix(zoom, zoom)
 
