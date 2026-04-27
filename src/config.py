@@ -18,6 +18,15 @@ VECTOR_STORE = DATA / "vector_store"
 OLLAMA_URL   = "http://localhost:11434"
 OLLAMA_MODEL = "gemma:latest"
 
+# ── Ollama sampling / response style ──────────────────────────────────────────
+# Lower temperature favors structured, deterministic study answers.
+OLLAMA_TEMPERATURE = 0.3
+OLLAMA_TOP_P = 0.9
+# Optional Mirostat controls. Set OLLAMA_MIROSTAT to 1 or 2 to enable.
+OLLAMA_MIROSTAT = None
+OLLAMA_MIROSTAT_TAU = 5.0
+OLLAMA_MIROSTAT_ETA = 0.1
+
 # ── Embeddings ────────────────────────────────────────────────────────────────
 # jina-v5-text-nano: 239M params, 32K token context, CPU-only, MTEB 71.0
 # IMPORTANT: Always use "Query: " / "Document: " prefixes for asymmetric retrieval

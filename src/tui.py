@@ -33,37 +33,59 @@ from textual.widgets import (
     TextArea,
 )
 
-from src.config import OLLAMA_MODEL, OLLAMA_URL, TOP_K_RESULTS
+from src.config import (
+    OLLAMA_MIROSTAT,
+    OLLAMA_MIROSTAT_ETA,
+    OLLAMA_MIROSTAT_TAU,
+    OLLAMA_MODEL,
+    OLLAMA_TEMPERATURE,
+    OLLAMA_TOP_P,
+    OLLAMA_URL,
+    TOP_K_RESULTS,
+)
+from src.clipboard import copy_to_clipboard, extract_code_blocks
 from src.db import embed_query, get_collection, list_collections
 
 
-PROMPT_TEMPLATE = """You are a study assistant for engineering students.
+PROMPT_TEMPLATE = """You are Axie, a study companion for engineering students in a terminal UI.
+Your response is shown in a Rich-friendly terminal, so keep formatting clean and structured.
 
-Answer policy:
-1) Always answer the question directly.
-2) Use the provided context as your primary source.
-3) If context is incomplete or missing details, supplement with reliable general knowledge.
-4) If the question connects the PDF topic with outside concepts, explain that connection clearly.
-5) Never output a refusal-only response.
-6) Keep answers concise and precise.
+Formatting rules:
+- Use markdown tables for comparisons, definitions, or structured properties.
+- Use **bold** for key terms and important values.
+- Use `code` for inline equations or symbols, and $$...$$ for display math.
+- Use numbered lists for steps/derivations and bullet lists for properties.
+- Keep answers dense and scannable (study notes style, not essay style).
+- End with a compact citation line (one line only).
 
-Source labeling:
-- If context was used, include: [Source: {book} · {chapter} · p.{pages}]
-- If any supplementation was used, append: [Supplemented from Researched knowledge]
+Structure policy:
+- If asked to compare or list multiple items, prefer a table.
+- If asked to explain a process/proof, use numbered steps.
+- If asked what something is, give one sharp paragraph then concise supporting detail.
 
-Use LaTeX notation for equations: $...$ inline, $$...$$ block.
+Source citation (last line only):
+[{book} · {chapter} · p.{pages}]
+If you supplement outside context, append: [+ general knowledge]
 
-Context:
+Context from {book}:
 {context}
 
 Question: {question}
 
 Answer:"""
 
-FALLBACK_PROMPT_TEMPLATE = """Answer this question directly using reliable general knowledge.
-Use context only if useful, and never refuse because context is incomplete.
-If relevant, relate the answer to the PDF topic.
-Be concise and factual.
+FALLBACK_PROMPT_TEMPLATE = """You are Axie, a study companion for engineering students.
+Answer directly using reliable general knowledge and any useful provided context.
+Do not refuse just because context is partial.
+
+Formatting rules:
+- Use markdown tables for structured comparisons when relevant.
+- Use numbered lists for derivations/processes.
+- Keep explanations concise, technical, and scannable.
+- Use `code` inline and $$...$$ for display math.
+
+End with a compact last line:
+[general knowledge] or [context + general knowledge]
 
 Question: {question}
 Context (optional):
@@ -71,11 +93,19 @@ Context (optional):
 
 Answer:"""
 
-ENFORCED_FALLBACK_PROMPT_TEMPLATE = """You must provide a best-effort answer to the question.
-Do not refuse, do not say context is missing, and do not say you cannot answer.
-If information is uncertain, state the uncertainty briefly and still provide the most likely explanation.
-If relevant, connect the answer to the PDF topic.
-Be concise and factual.
+ENFORCED_FALLBACK_PROMPT_TEMPLATE = """You are Axie, a study companion for engineering students.
+You must provide a best-effort answer.
+Do not refuse, do not mention missing context as a blocker, and do not say you cannot answer.
+If uncertain, state uncertainty briefly and still give the most likely explanation.
+
+Formatting rules:
+- Prefer tables for structured comparisons.
+- Prefer numbered steps for procedures/derivations.
+- Keep it concise, factual, and study-focused.
+- Use `code` inline and $$...$$ for display math.
+
+End with a compact last line:
+[general knowledge]
 
 Question: {question}
 Context (optional):
@@ -118,7 +148,8 @@ class SelectableResponse(TextArea):
         super().__init__(
             text=text,
             read_only=True,
-            soft_wrap=True,
+            # Preserve markdown table row alignment in terminal output.
+            soft_wrap=False,
             tab_behavior="focus",
             show_line_numbers=False,
             compact=True,
@@ -202,6 +233,32 @@ class AssistantMessage(Static):
     AssistantMessage .message-telemetry.visible {
         display: block;
     }
+
+    AssistantMessage .message-toolbar {
+        display: none;
+        margin-top: 1;
+        height: auto;
+        background: transparent;
+    }
+
+    AssistantMessage .message-toolbar.visible {
+        display: block;
+    }
+
+    AssistantMessage .copy-btn {
+        width: auto;
+        min-width: 12;
+        margin: 0 1 0 0;
+        border: round ansi_bright_black;
+        background: transparent;
+    }
+
+    AssistantMessage .copy-status {
+        color: ansi_bright_black;
+        text-style: dim;
+        width: 1fr;
+        content-align: left middle;
+    }
     """
 
     def __init__(
@@ -224,6 +281,10 @@ class AssistantMessage(Static):
         yield Label("", classes="message-label")
         yield SelectableResponse("", classes="message-content")
         yield Label("", classes="message-telemetry")
+        with Horizontal(classes="message-toolbar"):
+            yield Button("📋 Copy", classes="copy-btn copy-full-btn")
+            yield Button("</> Code", classes="copy-btn copy-code-btn")
+            yield Label("", classes="copy-status")
 
     def on_mount(self) -> None:
         self._thinking_timer = self.set_interval(0.35, self._advance_thinking, pause=not self.thinking)
@@ -250,6 +311,8 @@ class AssistantMessage(Static):
         label = self.query_one(".message-label", Label)
         body = self.query_one(".message-content", SelectableResponse)
         telemetry = self.query_one(".message-telemetry", Label)
+        toolbar = self.query_one(".message-toolbar", Horizontal)
+        copy_status = self.query_one(".copy-status", Label)
 
         if self.thinking:
             suffix = "." * (self.dots % 4)
@@ -257,6 +320,8 @@ class AssistantMessage(Static):
             body.load_text("")
             telemetry.update("")
             telemetry.remove_class("visible")
+            toolbar.remove_class("visible")
+            copy_status.update("")
             return
 
         if self._is_error:
@@ -264,10 +329,13 @@ class AssistantMessage(Static):
             body.load_text(self._content)
             telemetry.update("")
             telemetry.remove_class("visible")
+            toolbar.remove_class("visible")
+            copy_status.update("")
             return
 
         label.update("AxiomLM")
         body.load_text(self._content)
+        toolbar.add_class("visible")
         if self._telemetry_badge:
             telemetry.update(self._telemetry_badge)
             telemetry.add_class("visible")
@@ -295,6 +363,52 @@ class AssistantMessage(Static):
         self.thinking = False
         self._render_content()
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.has_class("copy-full-btn"):
+            success, message = copy_to_clipboard(self._content)
+            self._show_copy_status(success, message)
+            event.stop()
+            return
+        if event.button.has_class("copy-code-btn"):
+            code = extract_code_blocks(self._content)
+            if not code:
+                self._show_copy_status(False, "No fenced code blocks found.")
+            else:
+                success, message = copy_to_clipboard(code)
+                self._show_copy_status(success, message)
+            event.stop()
+
+    def copy_full(self) -> tuple[bool, str]:
+        return copy_to_clipboard(self._content)
+
+    def copy_code_only(self) -> tuple[bool, str]:
+        code = extract_code_blocks(self._content)
+        if not code:
+            return False, "No fenced code blocks found."
+        return copy_to_clipboard(code)
+
+    def _show_copy_status(self, success: bool, message: str) -> None:
+        if not self.is_mounted:
+            return
+        status = self.query_one(".copy-status", Label)
+        if success:
+            status.styles.color = "ansi_green"
+            status.styles.text_style = "bold"
+            status.update(f"✓ {message}")
+        else:
+            status.styles.color = "ansi_red"
+            status.styles.text_style = "bold"
+            status.update(f"✗ {message}")
+        self.set_timer(3.0, lambda: self._clear_copy_status())
+
+    def _clear_copy_status(self) -> None:
+        if not self.is_mounted:
+            return
+        status = self.query_one(".copy-status", Label)
+        status.styles.color = "ansi_bright_black"
+        status.styles.text_style = "dim"
+        status.update("")
+
 
 class AxiomLMApp(App):
     """AxiomLM terminal UI with sidebar, chat widgets, and Gemma integration."""
@@ -313,8 +427,8 @@ class AxiomLMApp(App):
 
     /* ── Sidebar ───────────────────────────────────────────────────────── */
     #sidebar {
-        width: 35%;
-        min-width: 64;
+        width: 25%;
+        min-width: 58;
         border-right: solid ansi_bright_black;
         background: transparent;
         padding-top: 1;
@@ -442,21 +556,29 @@ class AxiomLMApp(App):
 
     /* ── Chat panel ────────────────────────────────────────────────────── */
     #chat_panel {
-        width: 70%;
+        width: 1fr;
+        min-width: 0;
         layout: vertical;
         background: transparent;
+        padding-right: 1;
     }
 
     #chat_scroll {
         height: 1fr;
-        padding: 1 2;
+        padding: 1 2 0 2;
     }
 
     #query_input {
-        dock: bottom;
-        margin: 1 2;
+        margin: 1 2 2 2;
         height: 3;
         max-height: 8;
+        border: round ansi_bright_black;
+        background: ansi_black 5%;
+        padding: 0 1;
+    }
+
+    #query_input:focus {
+        border: round ansi_cyan;
     }
 
     /* ── Utilities ─────────────────────────────────────────────────────── */
@@ -506,6 +628,7 @@ class AxiomLMApp(App):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear_chat", "Clear", show=True),
+        Binding("ctrl+c", "copy_focused_message", "Copy", show=True),
         Binding("tab", "toggle_focus", "Focus", show=True),
         Binding("escape", "cancel_query", "Cancel", show=True),
     ]
@@ -684,6 +807,17 @@ class AxiomLMApp(App):
         await chat_scroll.remove_children("*")
         self._pending_assistants.clear()
 
+    def action_copy_focused_message(self) -> None:
+        focused = self.focused
+        while focused is not None:
+            if isinstance(focused, AssistantMessage):
+                success, message = focused.copy_full()
+                focused._show_copy_status(success, message)
+                self.notify(message, severity="information" if success else "warning")
+                return
+            focused = getattr(focused, "parent", None)
+        self.notify("Focus an assistant response to copy it.", severity="information")
+
     async def _append_chat_widget(self, widget: Static, animate: bool = True) -> None:
         chat_scroll = self.query_one("#chat_scroll", ScrollableContainer)
         await chat_scroll.mount(widget)
@@ -788,7 +922,7 @@ class AxiomLMApp(App):
                 with client.stream(
                     "POST",
                     f"{OLLAMA_URL}/api/generate",
-                    json={"model": model_name, "prompt": prompt, "stream": True},
+                    json=self._build_generate_payload(model_name, prompt, stream=True),
                 ) as response:
                     response.raise_for_status()
                     for line in response.iter_lines():
@@ -850,15 +984,15 @@ class AxiomLMApp(App):
                 accumulated_response = self._append_general_knowledge_tag(accumulated_response)
 
             # Stream only the final response to avoid flashing an initial refusal.
-            chunk_size = 16
-            for idx in range(0, len(accumulated_response), chunk_size):
+            # Stream by completed lines so markdown tables/lists do not flicker mid-row.
+            for chunk in self._iter_display_chunks(accumulated_response):
                 if self._is_query_cancelled(request_id):
                     self.call_from_thread(self._finalize_query_cancelled, request_id)
                     return
                 self.call_from_thread(
                     self._stream_query_token,
                     request_id,
-                    accumulated_response[idx : idx + chunk_size],
+                    chunk,
                 )
 
             self.call_from_thread(
@@ -927,13 +1061,44 @@ class AxiomLMApp(App):
         return any(marker in normalized for marker in refusal_markers)
 
     def _append_general_knowledge_tag(self, response: str) -> str:
-        tag = "[Supplemented from general knowledge]"
-        if tag.lower() in response.lower():
+        existing_markers = (
+            "[Supplemented from general knowledge]",
+            "[+ general knowledge]",
+        )
+        if any(marker.lower() in response.lower() for marker in existing_markers):
             return response
+        tag = "[+ general knowledge]"
         stripped = response.rstrip()
         if not stripped:
             return tag
         return f"{stripped}\n\n{tag}"
+
+    def _iter_display_chunks(self, response: str) -> list[str]:
+        if not response:
+            return []
+        lines = response.splitlines(keepends=True)
+        if lines:
+            return lines
+        return [response]
+
+    def _build_ollama_options(self) -> dict[str, object]:
+        options: dict[str, object] = {
+            "temperature": OLLAMA_TEMPERATURE,
+            "top_p": OLLAMA_TOP_P,
+        }
+        if OLLAMA_MIROSTAT in (1, 2):
+            options["mirostat"] = OLLAMA_MIROSTAT
+            options["mirostat_tau"] = OLLAMA_MIROSTAT_TAU
+            options["mirostat_eta"] = OLLAMA_MIROSTAT_ETA
+        return options
+
+    def _build_generate_payload(self, model_name: str, prompt: str, stream: bool) -> dict[str, object]:
+        return {
+            "model": model_name,
+            "prompt": prompt,
+            "stream": stream,
+            "options": self._build_ollama_options(),
+        }
 
     def _build_inference_badge(
         self, payload: dict[str, object], elapsed_seconds: float | None = None
@@ -975,7 +1140,7 @@ class AxiomLMApp(App):
         with Client(timeout=120.0) as client:
             response = client.post(
                 f"{OLLAMA_URL}/api/generate",
-                json={"model": model_name, "prompt": prompt, "stream": False},
+                json=self._build_generate_payload(model_name, prompt, stream=False),
             )
             response.raise_for_status()
             payload = response.json()
@@ -1002,7 +1167,7 @@ class AxiomLMApp(App):
         try:
             models = self._fetch_ollama_models()
             self._apply_model_options(models)
-        except Exception as exc:
+        except Exception:
             self._apply_model_options([])
 
     def _apply_model_options(self, models: list[str]) -> None:
@@ -1345,15 +1510,12 @@ class AxiomLMApp(App):
             return
 
         logo = (
-            " █████╗ ██╗  ██╗██╗ ██████╗ ███╗   ███╗  ██╗     ███╗   ███╗\n"
-            "██╔══██╗╚██╗██╔╝██║██╔═══██╗████╗ ████║  ██║     ████╗ ████║\n"
-            "███████║ ╚███╔╝ ██║██║   ██║██╔████╔██║  ██║     ██╔████╔██║\n"
-            "██╔══██║ ██╔██╗ ██║██║   ██║██║╚██╔╝██║  ██║     ██║╚██╔╝██║\n"
-            "██║  ██║██╔╝ ██╗██║╚██████╔╝██║ ╚═╝ ██║  ███████╗██║ ╚═╝ ██║\n"
-            "╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝ ╚═╝     ╚═╝  ╚══════╝╚═╝     ╚═╝"
+            " _______         __                    _____   _______ \n"
+            "|   _   |.--.--.|__|.-----.--------.  |     |_|   |   |\n"
+            "|       ||_   _||  ||  _  |        |  |       |       |\n" 
+            "|___|___||__.__||__||_____|__|__|__|  |_______|__|_|__|\n"
         )
         mascot_widget.update(Text(logo, style="bold ansi_cyan"))
-
-
+                                                         
 if __name__ == "__main__":
     AxiomLMApp().run()
