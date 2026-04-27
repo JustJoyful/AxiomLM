@@ -17,6 +17,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.message import Message
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.worker import Worker
 from textual.widgets import (
@@ -44,7 +45,7 @@ from src.config import (
     TOP_K_RESULTS,
 )
 from src.clipboard import copy_to_clipboard, extract_code_blocks
-from src.db import embed_query, get_collection, list_collections
+from src.db import delete_collection, embed_query, get_collection, list_collections
 
 
 PROMPT_TEMPLATE = """You are Axie, a study companion for engineering students in a terminal UI.
@@ -410,6 +411,151 @@ class AssistantMessage(Static):
         status.update("")
 
 
+class BookListRow(Static):
+    """Single sidebar row with title/count and a compact delete button."""
+
+    DEFAULT_CSS = """
+    BookListRow {
+        layout: horizontal;
+        width: 100%;
+        height: 1;
+        min-height: 1;
+        align: left middle;
+        background: transparent;
+    }
+
+    BookListRow .book-label {
+        width: 1fr;
+        height: 1;
+        margin: 0;
+        padding: 0;
+        color: ansi_bright_white;
+        background: transparent;
+        content-align: left middle;
+    }
+
+    BookListRow .book-delete-btn {
+        width: 5;
+        min-width: 5;
+        height: 1;
+        min-height: 1;
+        margin: 0 0 0 1;
+        padding: 0 1;
+        border: round ansi_red;
+        background: transparent;
+        color: ansi_red;
+        text-style: bold;
+        content-align: center middle;
+    }
+
+    BookListRow .book-delete-btn:hover {
+        background: ansi_red 15%;
+        color: ansi_bright_white;
+    }
+    """
+
+    def __init__(self, book_stem: str) -> None:
+        super().__init__()
+        self.book_stem = book_stem
+        self.book_label = Label("", classes="book-label")
+
+    def compose(self) -> ComposeResult:
+        yield self.book_label
+        yield Button(
+            "🗑️",
+            classes="book-delete-btn",
+            tooltip=f"Delete {self.book_stem}",
+            compact=True,
+            variant="error",
+        )
+
+
+class DeleteCollectionConfirm(ModalScreen[bool]):
+    """Confirm irreversible collection deletion."""
+
+    DEFAULT_CSS = """
+    DeleteCollectionConfirm {
+        align: center middle;
+    }
+
+    #delete_dialog {
+        width: 68;
+        max-width: 90%;
+        height: auto;
+        border: round ansi_red;
+        background: ansi_black;
+        padding: 1 2;
+    }
+
+    .delete-dialog-title {
+        color: ansi_red;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    .delete-dialog-body {
+        color: ansi_white;
+    }
+
+    .delete-dialog-warning {
+        color: ansi_yellow;
+        text-style: bold;
+    }
+
+    #delete_dialog_actions {
+        margin-top: 1;
+        height: auto;
+        align: right middle;
+    }
+
+    #delete_dialog_actions Button {
+        width: auto;
+        min-width: 12;
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, book_name: str, chunk_count: int, estimated_size_mb: float) -> None:
+        super().__init__()
+        self.book_name = book_name
+        self.chunk_count = chunk_count
+        self.estimated_size_mb = estimated_size_mb
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="delete_dialog"):
+            yield Label("Delete Collection", classes="delete-dialog-title")
+            yield Static(
+                f"Are you sure you want to delete '{self.book_name}'?",
+                classes="delete-dialog-body",
+            )
+            yield Static("", classes="delete-dialog-body")
+            yield Static("This will permanently erase:", classes="delete-dialog-warning")
+            yield Static(
+                f"• {self.chunk_count} indexed chunks\n"
+                "• All vector embeddings and metadata\n"
+                f"• ~{self.estimated_size_mb:.1f} MB of local storage",
+                classes="delete-dialog-body",
+            )
+            yield Static("", classes="delete-dialog-body")
+            yield Static("This action cannot be undone.", classes="delete-dialog-warning")
+            with Horizontal(id="delete_dialog_actions"):
+                yield Button("Cancel", id="delete_cancel_btn")
+                yield Button("Delete", id="delete_confirm_btn", variant="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "delete_confirm_btn":
+            self.dismiss(True)
+            return
+        self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class AxiomLMApp(App):
     """AxiomLM terminal UI with sidebar, chat widgets, and Gemma integration."""
 
@@ -500,20 +646,29 @@ class AxiomLMApp(App):
         padding: 0 1;
         background: transparent;
     }
-    
+
     ListItem > Label {
         color: ansi_bright_white;
         background: transparent;
     }
 
     ListItem.-highlight {
-        background: ansi_bright_black;
+        background: transparent;
     }
     
     ListItem.-highlight > Label {
         color: ansi_bright_cyan;
         text-style: bold;
         background: transparent;
+    }
+
+    ListItem.-highlight .book-label {
+        color: ansi_bright_cyan;
+        text-style: bold;
+    }
+
+    ListItem.-highlight .book-delete-btn {
+        color: ansi_red;
     }
 
     /* ── Inputs and Selects (Minimalist styling) ───────────────────────── */
@@ -629,6 +784,7 @@ class AxiomLMApp(App):
         Binding("ctrl+q", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear_chat", "Clear", show=True),
         Binding("ctrl+c", "copy_focused_message", "Copy", show=True),
+        Binding("ctrl+d", "delete_selected_book", "Delete Book", show=True),
         Binding("tab", "toggle_focus", "Focus", show=True),
         Binding("escape", "cancel_query", "Cancel", show=True),
     ]
@@ -734,9 +890,9 @@ class AxiomLMApp(App):
             except Exception:
                 count = 0
             self._book_counts[stem] = count
-            label = Label("", classes="book-label")
-            self._book_labels[stem] = label
-            book_list.append(ListItem(label, id=stem))
+            row = BookListRow(stem)
+            self._book_labels[stem] = row.book_label
+            book_list.append(ListItem(row, id=stem))
 
         self.active_collection_name = collections[0]
         book_list.index = 0
@@ -843,13 +999,17 @@ class AxiomLMApp(App):
         if not query:
             return
 
-        if not self.active_collection_name:
-            self.notify("No active book selected. Please parse a PDF first.", severity="error")
-            return
-
         input_widget = self.query_one("#query_input", QueryComposer)
         input_widget.clear()
         self._resize_query_input()
+
+        if query.startswith("/"):
+            await self._handle_chat_command(query)
+            return
+
+        if not self.active_collection_name:
+            self.notify("No active book selected. Please parse a PDF first.", severity="error")
+            return
 
         await self._append_chat_widget(UserMessage(query))
 
@@ -1437,12 +1597,141 @@ class AxiomLMApp(App):
         self.query_one("#query_input", QueryComposer).focus()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.has_class("book-delete-btn"):
+            event.stop()
+            current = event.button.parent
+            while current is not None and not isinstance(current, BookListRow):
+                current = current.parent
+            if isinstance(current, BookListRow):
+                self._prompt_delete_collection(current.book_stem)
+            return
+
         if event.button.id == "refresh_models_btn":
             self._refresh_models()
             return
 
         if event.button.id == "parse_pdf_btn":
             await self._start_parse_and_index()
+
+    def action_delete_selected_book(self) -> None:
+        if not self.active_collection_name:
+            self.notify("No active book selected.", severity="warning")
+            return
+        self._prompt_delete_collection(self.active_collection_name)
+
+    async def _handle_chat_command(self, command_text: str) -> None:
+        command, _, arg = command_text.partition(" ")
+        command = command.strip().lower()
+        argument = arg.strip()
+
+        if command != "/delete":
+            self.notify("Unknown command. Supported: /delete [book]", severity="warning")
+            return
+
+        target = argument or self.active_collection_name or ""
+        if not target:
+            self.notify("Usage: /delete [book]", severity="warning")
+            return
+
+        resolved, error = self._resolve_book_stem(target)
+        if not resolved:
+            self.notify(error, severity="warning")
+            return
+        self._prompt_delete_collection(resolved)
+
+    def _resolve_book_stem(self, raw: str) -> tuple[str | None, str]:
+        needle = raw.strip().lower()
+        if not needle:
+            return None, "Usage: /delete [book]"
+
+        stems = sorted(self._book_labels.keys())
+        if not stems:
+            return None, "No books indexed."
+
+        exact_matches = [
+            stem
+            for stem in stems
+            if stem.lower() == needle or self._format_book_name(stem).lower() == needle
+        ]
+        if exact_matches:
+            return exact_matches[0], ""
+
+        partial_matches = [
+            stem
+            for stem in stems
+            if needle in stem.lower() or needle in self._format_book_name(stem).lower()
+        ]
+        if len(partial_matches) == 1:
+            return partial_matches[0], ""
+        if len(partial_matches) > 1:
+            choices = ", ".join(self._format_book_name(stem) for stem in partial_matches[:4])
+            return None, f"Ambiguous book name. Matches: {choices}"
+        return None, f"Book not found: {raw}"
+
+    def _prompt_delete_collection(self, book_stem: str) -> None:
+        if self._active_query_worker is not None and self._active_query_worker.is_running:
+            self.notify("Cancel the running query before deleting a book.", severity="warning")
+            return
+        if self._is_parsing:
+            self.notify("Wait for parse/index to finish before deleting a book.", severity="warning")
+            return
+        if book_stem not in self._book_labels:
+            self.notify("Book is no longer available.", severity="warning")
+            return
+
+        book_name = self._format_book_name(book_stem)
+        chunk_count = self._book_counts.get(book_stem, 0)
+        estimated_size_mb = self._get_collection_size_mb(book_stem)
+        dialog = DeleteCollectionConfirm(book_name, chunk_count, estimated_size_mb)
+        self.push_screen(
+            dialog,
+            callback=lambda confirmed, stem=book_stem: self._handle_delete_confirm_result(stem, bool(confirmed)),
+        )
+
+    def _get_collection_size_mb(self, book_stem: str) -> float:
+        chunk_count = self._book_counts.get(book_stem)
+        if chunk_count is None:
+            try:
+                chunk_count = get_collection(book_stem).count()
+            except Exception:
+                chunk_count = 0
+        # Rough estimate: ~2KB per chunk including vector + metadata overhead.
+        return (chunk_count * 2.0) / 1024.0
+
+    def _handle_delete_confirm_result(self, book_stem: str, confirmed: bool) -> None:
+        if not confirmed:
+            return
+        self.run_worker(
+            lambda: self._delete_collection_worker(book_stem),
+            thread=True,
+            group="delete-collection",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def _delete_collection_worker(self, book_stem: str) -> None:
+        try:
+            deleted = delete_collection(book_stem)
+            self.call_from_thread(self._finalize_collection_delete, book_stem, deleted, "")
+        except Exception as exc:
+            detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+            self.call_from_thread(self._finalize_collection_delete, book_stem, False, detail)
+
+    async def _finalize_collection_delete(self, book_stem: str, deleted: bool, error: str) -> None:
+        if error:
+            self.notify(f"Delete failed: {error}", severity="error")
+            return
+        if not deleted:
+            self.notify(f"Collection '{self._format_book_name(book_stem)}' was not found.", severity="warning")
+            await self._populate_sidebar()
+            self._set_header()
+            return
+
+        deleted_name = self._format_book_name(book_stem)
+        await self._populate_sidebar()
+        self._set_header()
+        self.query_one("#query_input", QueryComposer).focus()
+        self.notify(f"Deleted '{deleted_name}'.", severity="information")
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "model_select":

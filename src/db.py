@@ -95,3 +95,20 @@ def list_collections() -> list[str]:
     """List all book stems (collections) currently in the database."""
     client = _get_client()
     return [col.name for col in client.list_collections()]
+
+
+def delete_collection(book_stem: str) -> bool:
+    """
+    Delete a ChromaDB collection by its book stem.
+
+    Returns True when deletion succeeds, False when the collection doesn't exist.
+    Raises RuntimeError for other failures.
+    """
+    client = _get_client()
+    try:
+        client.delete_collection(name=book_stem)
+        return True
+    except chromadb.errors.NotFoundError:
+        return False
+    except Exception as exc:  # pragma: no cover - defensive pass-through for Chroma internals
+        raise RuntimeError(f"Failed to delete collection '{book_stem}': {exc}") from exc
