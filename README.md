@@ -1,12 +1,12 @@
 <div align="center">
-AxiomLM.png
+
 ```
   _______         __                    _____   _______ 
 "|   _   |.--.--.|__|.-----.--------.  |     |_|   |   |
 "|       ||_   _||  ||  _  |        |  |       |       |
 "|___|___||__.__||__||_____|__|__|__|  |_______|__|_|__|
 ```
-
+![alt text](AxiomLM.png)
 ### Your Textbooks. Locally. Answered.
 
 **A fully local, privacy-first RAG study assistant that lives in your terminal.**  
