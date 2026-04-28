@@ -1,11 +1,10 @@
 <div align="center">
-
+AxiomLM.png
 ```
- ▄▄▄·▀▄▀· ▪  ▄▄▌   ▄▄▌  • ▌ ▄ ·.
-▐█ ▀█▐▀▀▄ ██ ██•   ██•  ·██ ▐███▪
-▄█▀▀█▐█•█▌▐█·██▪   ██▪  ▐█ ▌▐▌▐█·
-▐█ ▪▐▌▐█▄█▌▐█▌▐█▌▐▌▐█▌▐▌██ ██▌▐█▌
- ▀  ▀ ·▀▀▀ ▀▀▀.▀▀▀ .▀▀▀ ▀▀  █▪▀▀▀
+              _______         __                    _____   _______ 
+            "|   _   |.--.--.|__|.-----.--------.  |     |_|   |   |
+            "|       ||_   _||  ||  _  |        |  |       |       |
+            "|___|___||__.__||__||_____|__|__|__|  |_______|__|_|__|
 ```
 
 ### Your Textbooks. Locally. Answered.
@@ -63,8 +62,9 @@ This isn't a demo or a proof of concept. It's a study tool built by a student, f
 ---
 
 ## Screenshots
-
-> _Screenshots coming soon — demo video in progress_
+![alt text](image-2.png)
+![alt text](image-1.png)
+![alt text](image.png)
 
 ---
 
@@ -158,7 +158,7 @@ AxiomLM/
 - Linux (tested on Arch Linux)
 - Python 3.11+
 - [Ollama](https://ollama.ai) installed and running
-- NVIDIA GPU recommended (RTX 3050 or better for scanned PDF parsing)
+- NVIDIA GPU recommended (RTX 3050 or better for scanned PDF parsing) //since its my gpu :P
 
 ### One-Command Install
 
