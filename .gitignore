@@ -1,7 +1,7 @@
 # Data — never commit PDFs, images, markdown, or the vector store
 data/
 *.pdf
-*.png
+
 *.jpg
 *.jpeg
 !AxiomLM.png

@@ -46,7 +46,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from src.config import (
+from .config import (
     DISTANCE_THRESHOLD,
     INDEX_TIMEOUT_SECONDS,
     LOGS_DIR,
@@ -63,8 +63,8 @@ from src.config import (
     PYMUPDF4LLM_OCR_TIMEOUT_SECONDS,
     TOP_K_RESULTS,
 )
-from src.clipboard import copy_to_clipboard, extract_code_blocks
-from src.db import delete_collection, embed_query, get_collection, list_collections
+from .clipboard import copy_to_clipboard, extract_code_blocks
+from .db import delete_collection, embed_query, get_collection, list_collections
 
 
 def latex_to_unicode(text: str) -> str:
@@ -1771,8 +1771,8 @@ class AxiomLMApp(App):
 
     def _parse_and_index_worker(self, pdf_path: str, mode: str) -> None:
         try:
-            from src import checkpoint
-            from src.ocr import resolve_mode
+            from . import checkpoint
+            from .ocr import resolve_mode
 
             pdf = Path(pdf_path)
             run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
