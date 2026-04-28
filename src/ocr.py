@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import importlib.util
 from pathlib import Path
 
 from src.config import (
@@ -68,27 +69,27 @@ def _choose_auto_engine(pdf_path: Path) -> tuple[str, str]:
     try:
         import fitz  # PyMuPDF
     except ImportError:
-        return "marker", "PyMuPDF unavailable for inspection; defaulting to Marker."
+        return "pymupdf4llm", "PyMuPDF unavailable for inspection; defaulting to pymupdf4llm."
 
     try:
         doc = fitz.open(str(pdf_path))
     except Exception as exc:
         detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
         return (
-            "marker",
+            "pymupdf4llm",
             (
                 f"could not inspect PDF ({exc.__class__.__name__}: {detail}); "
-                "defaulting to Marker"
+                "defaulting to pymupdf4llm"
             ),
         )
     try:
         page_count = len(doc)
         if page_count == 0:
-            return "marker", "PDF has zero pages; defaulting to Marker."
+            return "pymupdf4llm", "PDF has zero pages; defaulting to pymupdf4llm."
 
         sample_indices = _sample_indices(page_count, AUTO_OCR_SAMPLE_PAGES)
         if not sample_indices:
-            return "marker", "No sample pages available; defaulting to Marker."
+            return "pymupdf4llm", "No sample pages available; defaulting to pymupdf4llm."
 
         try:
             scanned_votes = 0
@@ -106,6 +107,10 @@ def _choose_auto_engine(pdf_path: Path) -> tuple[str, str]:
                 ) or (
                     text_chars <= max(25, AUTO_OCR_TEXT_CHAR_THRESHOLD // 3)
                     and has_image_block
+                ) or (
+                    # Many scanned PDFs include an OCR text layer, so text_chars can be high.
+                    # If a page is effectively a full-page image, still treat it as scan-like.
+                    image_coverage >= 0.90 and has_image_block
                 )
                 if scan_like:
                     scanned_votes += 1
@@ -118,7 +123,7 @@ def _choose_auto_engine(pdf_path: Path) -> tuple[str, str]:
             chosen = (
                 "mineru"
                 if scanned_ratio >= AUTO_OCR_SCANNED_PAGE_RATIO_THRESHOLD
-                else "marker"
+                else "pymupdf4llm"
             )
             reason = (
                 f"sampled {sampled}/{page_count} pages | "
@@ -130,10 +135,10 @@ def _choose_auto_engine(pdf_path: Path) -> tuple[str, str]:
         except Exception as exc:
             detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
             return (
-                "marker",
+                "pymupdf4llm",
                 (
                     f"auto inspection failed ({exc.__class__.__name__}: {detail}); "
-                    "defaulting to Marker"
+                    "defaulting to pymupdf4llm"
                 ),
             )
     finally:
@@ -146,15 +151,33 @@ def resolve_mode(pdf_path: Path, mode: str) -> tuple[str, str]:
 
     For manual modes, returns the selected mode with a manual-selection reason.
     For auto mode, returns the heuristic decision and rationale.
+
+    Engines:
+      pymupdf4llm  — fast, zero-GPU, default for clean digital PDFs
+      mineru       — ML pipeline for warped/scanned PDFs
+      marker       — high-quality ML (8 GB VRAM), manual only
     """
     normalized = mode.lower().strip()
     if normalized == "auto":
         return _choose_auto_engine(pdf_path)
-    if normalized in {"marker", "mineru"}:
+    if normalized in {"pymupdf4llm", "marker", "mineru"}:
         return normalized, "manual mode selected"
     raise ValueError(
-        f"Unknown OCR mode: '{mode}'. Expected one of: marker, mineru, auto"
+        f"Unknown OCR mode: '{mode}'. Expected one of: pymupdf4llm, marker, mineru, auto"
     )
+
+
+def _mineru_available() -> bool:
+    """
+    Check whether MinerU runtime is available (legacy SDK or modern CLI).
+
+    Legacy MinerU exposed `magic_pdf`; newer releases expose `mineru` CLI/package.
+    """
+    if importlib.util.find_spec("magic_pdf") is not None:
+        return True
+    if importlib.util.find_spec("mineru") is not None:
+        return True
+    return False
 
 
 def route(pdf_path: Path, mode: str = "auto", force: bool = False) -> list[Path]:
@@ -163,9 +186,10 @@ def route(pdf_path: Path, mode: str = "auto", force: bool = False) -> list[Path]
 
     Args:
         pdf_path: Path to the input PDF.
-        mode:     "marker"  — use Marker (clean digital PDFs).
-                  "mineru"  — use MinerU (warped/scanned PDFs).
-                  "auto"    — inspect sampled pages, then choose Marker or MinerU.
+        mode:     "pymupdf4llm" — fast zero-GPU engine for clean digital PDFs (default auto).
+                  "mineru"      — use MinerU (warped/scanned PDFs).
+                  "marker"      — use Marker (high-quality ML, needs ~8 GB VRAM).
+                  "auto"        — inspect sampled pages, choose pymupdf4llm or MinerU.
         force:    If True, re-process all pages ignoring existing checkpoints.
 
     Returns:
@@ -186,19 +210,33 @@ def route(pdf_path: Path, mode: str = "auto", force: bool = False) -> list[Path]
 
     if mode == "auto":
         chosen_mode, reason = resolve_mode(pdf_path, mode)
+        if chosen_mode == "mineru" and not _mineru_available():
+            chosen_mode = "pymupdf4llm"
+            reason = (
+                f"{reason}; MinerU is not installed, falling back to pymupdf4llm "
+                "(install with: uv pip install mineru)"
+            )
         print(f"Auto mode selected '{chosen_mode}' ({reason})")
         mode = chosen_mode
+
+    if mode == "pymupdf4llm":
+        from src.ocr_pymupdf4llm import run
+        return run(pdf_path, force=force)
 
     if mode == "marker":
         from src.ocr_marker import run
         return run(pdf_path, force=force)
 
     if mode == "mineru":
+        if not _mineru_available():
+            raise ImportError(
+                "MinerU (magic-pdf) is not installed. Install with: uv pip install mineru"
+            )
         from src.ocr_mineru import run
         return run(pdf_path, force=force)
 
     raise ValueError(
-        f"Unknown OCR mode: '{mode}'. Expected one of: marker, mineru, auto"
+        f"Unknown OCR mode: '{mode}'. Expected one of: pymupdf4llm, marker, mineru, auto"
     )
 
 
@@ -209,17 +247,21 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  python -m src.ocr --pdf book.pdf\n"
+            "  python -m src.ocr --pdf book.pdf --mode pymupdf4llm\n"
             "  python -m src.ocr --pdf scan.pdf --mode mineru\n"
             "  python -m src.ocr --pdf scan.pdf --mode mineru --force\n"
+            "  python -m src.ocr --pdf book.pdf --mode marker  # needs ~8GB VRAM\n"
         ),
     )
     parser.add_argument("--pdf", type=Path, required=True, help="Path to input PDF")
     parser.add_argument(
         "--mode",
-        choices=["auto", "marker", "mineru"],
+        choices=["auto", "pymupdf4llm", "mineru", "marker"],
         default="auto",
         help=(
-            "OCR engine: 'marker' for clean PDFs, 'mineru' for scanned, "
+            "OCR engine: 'pymupdf4llm' (fast, no GPU, default for clean PDFs), "
+            "'mineru' for scanned PDFs, "
+            "'marker' for high-quality ML output (needs ~8GB VRAM), "
             "'auto' for heuristic routing (default: auto)"
         ),
     )

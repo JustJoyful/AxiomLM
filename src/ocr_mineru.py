@@ -1,25 +1,28 @@
 """
 ocr_mineru.py — MinerU OCR runner for warped/complex scanned PDFs.
 
-Processes PDFs page-by-page, clearing VRAM after each page to stay within
-the 6 GB RTX 3050 constraint. Checkpoints each page so any crash is
-fully resumable without re-processing completed pages.
-
-Satisfies REQ-03 (MinerU with VRAM guard) and REQ-04 (crash recovery).
+Uses the modern MinerU CLI to parse a full PDF, then materializes
+per-page checkpoints for resumable downstream indexing.
 """
 
 import gc
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-import fitz  # PyMuPDF — for single-page image extraction
-
 from src import checkpoint
-from src.config import CLEAN_IMGS, MINERU_MIN_VRAM_GB, PARSED_MD
+from src.config import (
+    MINERU_BACKEND_FALLBACK,
+    MINERU_BACKEND_PRIMARY,
+    MINERU_BATCH_PAGES,
+    MINERU_LANG,
+    MINERU_MIN_VRAM_GB,
+    PARSED_MD,
+)
 
-
-# ── VRAM utilities ────────────────────────────────────────────────────────────
 
 def _free_vram_gb() -> float:
     """
@@ -28,24 +31,23 @@ def _free_vram_gb() -> float:
     """
     try:
         import torch
+
         if not torch.cuda.is_available():
             return 999.0
         props = torch.cuda.get_device_properties(0)
         total = props.total_memory
         reserved = torch.cuda.memory_reserved(0)
         free = total - reserved
-        return free / (1024 ** 3)
+        return free / (1024**3)
     except Exception:
         return 999.0
 
 
 def _clear_vram() -> None:
-    """
-    Flush CUDA cache and run Python garbage collection.
-    No-op if CUDA is not available.
-    """
+    """Flush CUDA cache and run Python garbage collection."""
     try:
         import torch
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:
@@ -53,121 +55,231 @@ def _clear_vram() -> None:
     gc.collect()
 
 
-# ── MinerU page runner ────────────────────────────────────────────────────────
-
-def _run_mineru_on_image(image_path: Path, tmp_dir: Path) -> str:
-    """
-    Run MinerU on a single page image and return the markdown text.
-    Raises ImportError with a clear message if MinerU is not installed.
-    """
+def _pdf_page_count(pdf_path: Path) -> int:
+    """Return PDF page count using PyMuPDF; returns 0 when unavailable."""
     try:
-        from magic_pdf.data.data_reader_writer import FileBasedDataWriter
-        from magic_pdf.pipe.UNIPipe import UNIPipe
-    except ImportError as exc:
-        raise ImportError(
-            "MinerU (magic-pdf) is not installed. Run: pip install mineru"
-        ) from exc
+        import fitz
+    except Exception:
+        return 0
 
-    image_bytes = image_path.read_bytes()
-    writer = FileBasedDataWriter(str(tmp_dir))
-
-    pipe = UNIPipe(image_bytes, {"_pdf_type": "", "model_list": []}, writer)
-    pipe.pipe_classify()
-    pipe.pipe_analyze()
-    pipe.pipe_parse()
-    md_text = pipe.pipe_mk_markdown(writer, drop_mode="none")
-
-    return md_text if isinstance(md_text, str) else ""
+    doc = fitz.open(str(pdf_path))
+    try:
+        return len(doc)
+    finally:
+        doc.close()
 
 
-# ── Main runner ───────────────────────────────────────────────────────────────
+def _run_mineru_cli(
+    pdf_path: Path,
+    tmp_dir: Path,
+    start_page: int | None = None,
+    end_page: int | None = None,
+    backend: str | None = None,
+) -> str:
+    """Run MinerU CLI on a full PDF and return markdown text.
+
+    Args:
+        backend: MinerU backend string (e.g. 'pipeline', 'hybrid-auto-engine').
+                 Defaults to MINERU_BACKEND_PRIMARY from config.
+    """
+    mineru_bin = shutil.which("mineru")
+    if mineru_bin is None:
+        candidate = Path(sys.executable).parent / "mineru"
+        if candidate.exists():
+            mineru_bin = str(candidate)
+    if mineru_bin is None:
+        raise ImportError("MinerU CLI not found. Install with: uv pip install mineru")
+
+    chosen_backend = backend or MINERU_BACKEND_PRIMARY
+    output_dir = tmp_dir / "mineru_out"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        mineru_bin,
+        "-p",
+        str(pdf_path),
+        "-o",
+        str(output_dir),
+        "-m",
+        "ocr",
+        "-b",
+        chosen_backend,
+    ]
+    if MINERU_LANG:
+        cmd.extend(["-l", MINERU_LANG])
+    if start_page is not None:
+        cmd.extend(["-s", str(start_page)])
+    if end_page is not None:
+        cmd.extend(["-e", str(end_page)])
+
+    env = dict(os.environ)
+    env.setdefault("CUDA_VISIBLE_DEVICES", "0")
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    env["PYTHONUNBUFFERED"] = "1"
+
+    completed = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+        env=env,
+    )
+    if completed.returncode != 0:
+        tail = "\n".join(
+            line for line in (completed.stdout + "\n" + completed.stderr).splitlines()[-20:]
+        )
+        raise RuntimeError(f"MinerU CLI failed (exit {completed.returncode}, backend={chosen_backend}). {tail}")
+
+    stem = pdf_path.stem
+    candidates = list(output_dir.rglob(f"{stem}.md"))
+    if not candidates:
+        md_files = list(output_dir.rglob("*.md"))
+        if not md_files:
+            raise RuntimeError("MinerU produced no markdown output.")
+        candidates = [max(md_files, key=lambda p: p.stat().st_size)]
+
+    return candidates[0].read_text(encoding="utf-8")
+
 
 def run(pdf_path: Path, force: bool = False) -> list[Path]:
     """
-    Run MinerU OCR on a warped/complex scanned PDF page-by-page.
-
-    Steps per page:
-      1. Check checkpoint; skip if already done (unless force=True).
-      2. Guard: warn if free VRAM < MINERU_MIN_VRAM_GB, prompt user to continue.
-      3. Extract page as image using fitz.
-      4. Run MinerU on the single-page image.
-      5. Save result to checkpoint.
-      6. Clear VRAM: torch.cuda.empty_cache() + gc.collect().
+    Run MinerU OCR on scanned PDFs, then checkpoint by page.
 
     Args:
         pdf_path: Path to the scanned PDF.
-        force:    If True, re-process even checkpointed pages.
-
-    Returns:
-        Sorted list of per-page checkpoint paths.
+        force: If True, re-process even checkpointed pages.
     """
     pdf_path = Path(pdf_path)
     book_stem = pdf_path.stem
+    total_pages = _pdf_page_count(pdf_path)
     resume_from = checkpoint.last_completed(book_stem)
+    first_page = 0 if force else (resume_from + 1)
 
     if resume_from >= 0 and not force:
         print(f"  Resuming from page {resume_from + 1} (pages 0–{resume_from} already done)")
+    if total_pages > 0:
+        print(f"  Detected {total_pages} pages. MinerU batch size: {MINERU_BATCH_PAGES}.")
+        if first_page >= total_pages:
+            return checkpoint.all_pages(book_stem)
 
-    try:
-        doc = fitz.open(str(pdf_path))
-    except Exception as exc:
-        detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+    free = _free_vram_gb()
+    if free < MINERU_MIN_VRAM_GB:
+        print(f"\n  ⚠  Low VRAM: {free:.1f} GB free, need ≥{MINERU_MIN_VRAM_GB} GB")
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "Aborted: insufficient VRAM in non-interactive mode "
+                f"({free:.1f} GB < {MINERU_MIN_VRAM_GB} GB)"
+            )
+        answer = input("  Continue anyway? [y/N] ").strip().lower()
+        if answer != "y":
+            raise RuntimeError(f"Aborted: insufficient VRAM ({free:.1f} GB < {MINERU_MIN_VRAM_GB} GB)")
+
+    # Determine which backends to try in order (primary → fallback).
+    backends_to_try: list[str] = [MINERU_BACKEND_PRIMARY]
+    if (
+        MINERU_BACKEND_FALLBACK
+        and MINERU_BACKEND_FALLBACK != MINERU_BACKEND_PRIMARY
+    ):
+        backends_to_try.append(MINERU_BACKEND_FALLBACK)
+
+    def _run_with_fallback(
+        start_page: int | None = None,
+        end_page: int | None = None,
+        tmp_dir: Path | None = None,
+    ) -> str:
+        """Try each backend in order; raise the last error if all fail."""
+        last_exc: Exception | None = None
+        _tmp_dir = tmp_dir or Path(tempfile.mkdtemp(prefix="axiom_mineru_"))
+        for backend in backends_to_try:
+            try:
+                label = f" (backend={backend})" if len(backends_to_try) > 1 else ""
+                if start_page is not None:
+                    print(
+                        f"  Running MinerU pages {start_page + 1}–{(end_page or start_page) + 1}"
+                        f"/{total_pages}{label} ..."
+                    )
+                else:
+                    print(f"  Running MinerU on: {pdf_path.name}{label} ...")
+                return _run_mineru_cli(
+                    pdf_path,
+                    _tmp_dir,
+                    start_page=start_page,
+                    end_page=end_page,
+                    backend=backend,
+                )
+            except RuntimeError as exc:
+                last_exc = exc
+                if len(backends_to_try) > 1:
+                    print(f"  ⚠  MinerU backend '{backend}' failed: {str(exc).splitlines()[0]}")
+                    _clear_vram()
         raise RuntimeError(
-            f"MinerU failed to open '{pdf_path.name}': {exc.__class__.__name__}: {detail}"
-        ) from exc
-    zoom = 200 / 72  # 200 DPI render
-    mat = fitz.Matrix(zoom, zoom)
+            f"All MinerU backends failed. Last error: {last_exc}"
+        ) from last_exc
 
-    with tempfile.TemporaryDirectory(prefix="axiom_mineru_") as tmp_str:
-        tmp_dir = Path(tmp_str)
+    if total_pages <= 0:
+        with tempfile.TemporaryDirectory(prefix="axiom_mineru_") as tmp_str:
+            tmp_dir = Path(tmp_str)
+            full_md = _run_with_fallback(tmp_dir=tmp_dir)
 
-        for page_idx in range(len(doc)):
+        pages = full_md.split("\f") if "\f" in full_md else [full_md]
+        for page_idx, page_text in enumerate(pages):
             if page_idx <= resume_from and not force:
-                print(f"  Skipping page {page_idx:04d} (checkpointed)")
                 continue
-
-            # VRAM guard before each page
-            free = _free_vram_gb()
-            if free < MINERU_MIN_VRAM_GB:
-                print(f"\n  ⚠  Low VRAM: {free:.1f} GB free, need ≥{MINERU_MIN_VRAM_GB} GB")
-                answer = input("  Continue anyway? [y/N] ").strip().lower()
-                if answer != "y":
-                    doc.close()
-                    raise RuntimeError(
-                        f"Aborted: insufficient VRAM ({free:.1f} GB < {MINERU_MIN_VRAM_GB} GB)"
+            checkpoint.save(book_stem, page_idx, page_text)
+            if page_idx % 25 == 0:
+                print(f"  ✓ page {page_idx:04d}")
+    else:
+        with tempfile.TemporaryDirectory(prefix="axiom_mineru_") as tmp_str:
+            tmp_dir = Path(tmp_str)
+            for batch_start in range(first_page, total_pages, MINERU_BATCH_PAGES):
+                batch_end = min(total_pages - 1, batch_start + MINERU_BATCH_PAGES - 1)
+                batch_md = _run_with_fallback(
+                    start_page=batch_start,
+                    end_page=batch_end,
+                    tmp_dir=tmp_dir,
+                )
+                batch_pages = batch_md.split("\f") if "\f" in batch_md else [batch_md]
+                expected = batch_end - batch_start + 1
+                # Trim trailing blank pages that MinerU sometimes appends
+                while len(batch_pages) > expected and not batch_pages[-1].strip():
+                    batch_pages.pop()
+                # Warn but don't abort — MinerU may split scanned pages differently
+                if len(batch_pages) != expected:
+                    print(
+                        f"  ⚠  MinerU returned {len(batch_pages)} page(s) for range "
+                        f"{batch_start + 1}–{batch_end + 1} (expected {expected}); "
+                        "continuing with what was produced."
                     )
 
-            # Extract page as PNG
-            page = doc[page_idx]
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            img_path = tmp_dir / f"page_{page_idx:04d}.png"
-            pix.save(str(img_path))
+                for offset, page_text in enumerate(batch_pages):
+                    page_idx = batch_start + offset
+                    checkpoint.save(book_stem, page_idx, page_text)
+                    print(f"  ✓ page {page_idx:04d}")
 
-            # Run MinerU
-            print(f"  Processing page {page_idx:04d} ...", end=" ", flush=True)
-            md_text = _run_mineru_on_image(img_path, tmp_dir)
-            checkpoint.save(book_stem, page_idx, md_text)
-            print("✓")
+    _clear_vram()
 
-            # Flush VRAM after every page
-            _clear_vram()
-
-    doc.close()
-
-    # Write concatenated full.md
-    all_pages = checkpoint.all_pages(book_stem)
-    full_md = "\f".join(p.read_text(encoding="utf-8") for p in all_pages)
     out_dir = PARSED_MD / book_stem
     out_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_paths = checkpoint.all_pages(book_stem)
+    if not checkpoint_paths:
+        raise RuntimeError("MinerU produced no checkpoint pages.")
+    if total_pages > 0 and len(checkpoint_paths) < total_pages:
+        print(
+            f"  ⚠  Checkpoint set may be incomplete: found {len(checkpoint_paths)} page(s), "
+            f"PDF reported {total_pages}. Proceeding with what was produced."
+        )
+    full_md = "\f".join(path.read_text(encoding="utf-8") for path in checkpoint_paths)
     (out_dir / "full.md").write_text(full_md, encoding="utf-8")
 
-    return all_pages
+    return checkpoint_paths
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="MinerU OCR — warped PDF → Markdown")
+    parser = argparse.ArgumentParser(description="MinerU OCR — scanned PDF → Markdown")
     parser.add_argument("pdf", type=Path, help="Path to scanned PDF")
     parser.add_argument("--force", action="store_true", help="Re-process all pages")
     args = parser.parse_args()

@@ -8,11 +8,23 @@ from the last successfully processed page.
 Satisfies REQ-02.
 """
 
+import gc
 import sys
 from pathlib import Path
 
 from src import checkpoint
 from src.config import PARSED_MD
+
+
+def _clear_vram() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    gc.collect()
 
 
 def run(pdf_path: Path, force: bool = False) -> list[Path]:
@@ -55,10 +67,49 @@ def run(pdf_path: Path, force: bool = False) -> list[Path]:
     try:
         rendered = converter(str(pdf_path))
     except Exception as exc:
-        detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
-        raise RuntimeError(
-            f"Marker failed to open or parse '{pdf_path.name}': {exc.__class__.__name__}: {detail}"
-        ) from exc
+        message = str(exc)
+        _OOM_SIGNALS = (
+            "outofmemoryerror",
+            "cuda out of memory",
+            "out of memory",
+            "cudaerroroutofmemory",
+            "cudamalloc failed",
+        )
+        is_oom = any(sig in message.lower() for sig in _OOM_SIGNALS)
+        if is_oom:
+            print("  ⚠ Marker GPU OOM. Retrying on CPU...")
+            # Aggressively free the GPU before re-loading model onto CPU
+            try:
+                del converter
+            except Exception:
+                pass
+            _clear_vram()
+            try:
+                import os
+                # Hide the GPU entirely for this in-process retry so Marker
+                # cannot accidentally try GPU again during model loading.
+                _orig_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+                os.environ["CUDA_VISIBLE_DEVICES"] = ""
+                try:
+                    converter = PdfConverter(artifact_dict=create_model_dict(device="cpu"))
+                    rendered = converter(str(pdf_path))
+                finally:
+                    # Restore CUDA visibility regardless of success/failure
+                    if _orig_visible is None:
+                        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                    else:
+                        os.environ["CUDA_VISIBLE_DEVICES"] = _orig_visible
+            except Exception as retry_exc:
+                detail = str(retry_exc).splitlines()[0] if str(retry_exc) else retry_exc.__class__.__name__
+                raise RuntimeError(
+                    f"Marker GPU OOM and CPU retry failed for '{pdf_path.name}': "
+                    f"{retry_exc.__class__.__name__}: {detail}"
+                ) from retry_exc
+        else:
+            detail = message.splitlines()[0] if message else exc.__class__.__name__
+            raise RuntimeError(
+                f"Marker failed to open or parse '{pdf_path.name}': {exc.__class__.__name__}: {detail}"
+            ) from exc
     full_md: str = rendered.markdown
 
     # Split into pages on form-feed; fall back to single page if no \f present

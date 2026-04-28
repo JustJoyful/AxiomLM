@@ -7,6 +7,10 @@
 #
 # MinerU note: Install separately if needed.
 #   pip install mineru  (or per their docs at github.com/opendatalab/MinerU)
+#   For MinerU 3.x runtime, these may also be required:
+#   shapely
+#   pyclipper
+#   omegaconf
 
 # ── Image preprocessing ───────────────────────────────────────────────────────
 opencv-python>=4.9.0
@@ -14,8 +18,10 @@ opencv-python>=4.9.0
 # ── PDF handling & metadata ───────────────────────────────────────────────────
 pymupdf>=1.24.0          # fitz — page extraction, metadata reading
 
-# ── OCR — clean digital PDFs ─────────────────────────────────────────────────
-marker-pdf>=0.3.0        # Marker: PDF → Markdown, math-aware, no pipeline to write
+# ── OCR — clean digital PDFs ────────────────────────────────────────────────────────────────
+pymupdf4llm>=1.27.0       # fast zero-GPU clean PDF → Markdown (default auto engine)
+marker-pdf>=0.3.0         # Marker: ML-quality math/table PDF → Markdown (manual, 8GB VRAM)
+albumentations>=1.3.0     # required by MinerU formula recognition (UnimerNet)
 
 # ── Chunking ─────────────────────────────────────────────────────────────────
 langchain>=0.2.0

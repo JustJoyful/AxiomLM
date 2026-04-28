@@ -5,9 +5,19 @@ Provides a Textual application with a sidebar to switch between indexed textbook
 and a chat panel to interact with Gemma via Ollama using RAG.
 """
 
+import importlib.util
 import json
+import os
+import re
+import signal
+import subprocess
+import sys
 import time
+from datetime import datetime
 from pathlib import Path
+from queue import Empty, Queue
+from threading import Thread
+from typing import Callable
 from uuid import uuid4
 
 from httpx import Client, ConnectError, HTTPStatusError, ReadTimeout
@@ -35,6 +45,11 @@ from textual.widgets import (
 )
 
 from src.config import (
+    DISTANCE_THRESHOLD,
+    INDEX_TIMEOUT_SECONDS,
+    LOGS_DIR,
+    MARKER_OCR_TIMEOUT_SECONDS,
+    MINERU_OCR_TIMEOUT_SECONDS,
     OLLAMA_MIROSTAT,
     OLLAMA_MIROSTAT_ETA,
     OLLAMA_MIROSTAT_TAU,
@@ -42,6 +57,8 @@ from src.config import (
     OLLAMA_TEMPERATURE,
     OLLAMA_TOP_P,
     OLLAMA_URL,
+    PROCESS_TERMINATE_GRACE_SECONDS,
+    PYMUPDF4LLM_OCR_TIMEOUT_SECONDS,
     TOP_K_RESULTS,
 )
 from src.clipboard import copy_to_clipboard, extract_code_blocks
@@ -556,8 +573,96 @@ class DeleteCollectionConfirm(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class TuningPanel(Static):
+    """Compact, live retrieval controls shown under the query input."""
+
+    class TopkChanged(Message):
+        def __init__(self, value: int) -> None:
+            super().__init__()
+            self.value = value
+
+    class DistanceChanged(Message):
+        def __init__(self, value: float) -> None:
+            super().__init__()
+            self.value = value
+
+    TOP_K_MIN = 3
+    TOP_K_MAX = 20
+    DIST_MIN = 0.0
+    DIST_MAX = 1.0
+    DIST_STEP = 0.05
+
+    def __init__(self, top_k: int, distance: float) -> None:
+        super().__init__(id="query_tuning")
+        self._top_k = self._clamp_top_k(top_k)
+        self._distance = self._clamp_distance(distance)
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="tuning-row"):
+            yield Label("K", classes="tuning-key")
+            yield Button("-", id="topk_dec_btn", classes="tune-btn", compact=True)
+            yield Label("", id="topk_value", classes="tuning-value")
+            yield Button("+", id="topk_inc_btn", classes="tune-btn", compact=True)
+            yield Label("", classes="tuning-gap")
+            yield Label("D", classes="tuning-key")
+            yield Button("-", id="dist_dec_btn", classes="tune-btn", compact=True)
+            yield Label("", id="dist_value", classes="tuning-value")
+            yield Button("+", id="dist_inc_btn", classes="tune-btn", compact=True)
+
+    def on_mount(self) -> None:
+        self._refresh_labels()
+
+    def set_values(self, top_k: int, distance: float) -> None:
+        self._top_k = self._clamp_top_k(top_k)
+        self._distance = self._clamp_distance(distance)
+        self._refresh_labels()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id == "topk_dec_btn":
+            self._top_k = self._clamp_top_k(self._top_k - 1)
+            self._refresh_labels()
+            self.post_message(self.TopkChanged(self._top_k))
+            event.stop()
+            return
+        if button_id == "topk_inc_btn":
+            self._top_k = self._clamp_top_k(self._top_k + 1)
+            self._refresh_labels()
+            self.post_message(self.TopkChanged(self._top_k))
+            event.stop()
+            return
+        if button_id == "dist_dec_btn":
+            self._distance = self._clamp_distance(self._distance - self.DIST_STEP)
+            self._refresh_labels()
+            self.post_message(self.DistanceChanged(self._distance))
+            event.stop()
+            return
+        if button_id == "dist_inc_btn":
+            self._distance = self._clamp_distance(self._distance + self.DIST_STEP)
+            self._refresh_labels()
+            self.post_message(self.DistanceChanged(self._distance))
+            event.stop()
+
+    def _refresh_labels(self) -> None:
+        if not self.is_mounted:
+            return
+        self.query_one("#topk_value", Label).update(f"{self._top_k}")
+        self.query_one("#dist_value", Label).update(f"{self._distance:.2f}")
+
+    @classmethod
+    def _clamp_top_k(cls, value: int) -> int:
+        return max(cls.TOP_K_MIN, min(cls.TOP_K_MAX, int(value)))
+
+    @classmethod
+    def _clamp_distance(cls, value: float) -> float:
+        rounded = round(float(value), 2)
+        return max(cls.DIST_MIN, min(cls.DIST_MAX, rounded))
+
+
 class AxiomLMApp(App):
     """AxiomLM terminal UI with sidebar, chat widgets, and Gemma integration."""
+    top_k_results = reactive(TOP_K_RESULTS)
+    distance_threshold = reactive(DISTANCE_THRESHOLD)
 
     CSS = """
     Screen {
@@ -724,7 +829,7 @@ class AxiomLMApp(App):
     }
 
     #query_input {
-        margin: 1 2 2 2;
+        margin: 1 2 0 2;
         height: 3;
         max-height: 8;
         border: round ansi_bright_black;
@@ -734,6 +839,90 @@ class AxiomLMApp(App):
 
     #query_input:focus {
         border: round ansi_cyan;
+    }
+
+    #query_tuning {
+        margin: 0 2 1 2;
+        border: none;
+        background: transparent;
+        height: 1;
+        min-height: 1;
+        padding: 0;
+    }
+
+    #query_tuning .tuning-title {
+        color: ansi_bright_black;
+        text-style: bold;
+        width: 6;
+    }
+
+    #query_tuning .tuning-row {
+        layout: horizontal;
+        align: left middle;
+        height: 1;
+        margin: 0;
+    }
+
+    #query_tuning .tuning-key {
+        width: 2;
+        color: ansi_bright_white;
+        content-align: center middle;
+    }
+
+    #query_tuning .tuning-gap {
+        width: 2;
+        min-width: 2;
+    }
+
+    #query_tuning .tuning-value {
+        width: 6;
+        min-width: 6;
+        color: ansi_cyan;
+        text-style: bold;
+        content-align: center middle;
+    }
+
+    #query_tuning .tune-btn {
+        width: 3;
+        min-width: 3;
+        height: 1;
+        min-height: 1;
+        margin: 0;
+        padding: 0;
+        border: none;
+        background: transparent;
+        color: ansi_bright_black;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #query_tuning .tune-btn:hover {
+        color: ansi_cyan;
+        text-style: bold;
+        background: transparent;
+    }
+
+    #query_tuning .tune-btn:focus {
+        border: none;
+        background: transparent;
+        color: ansi_cyan;
+        text-style: bold;
+    }
+
+    #query_tuning Button {
+        margin: 0;
+        border: none;
+        background: transparent;
+        padding: 0;
+    }
+
+    #query_tuning Button:hover {
+        background: transparent;
+    }
+
+    #query_tuning Button:focus {
+        border: none;
+        background: transparent;
     }
 
     /* ── Utilities ─────────────────────────────────────────────────────── */
@@ -828,9 +1017,10 @@ class AxiomLMApp(App):
                 yield Input(placeholder="/path/to/book.pdf", id="pdf_path_input")
                 yield Select(
                     [
-                        ("Auto (smart routing)", "auto"),
-                        ("Marker (clean PDFs)", "marker"),
-                        ("MinerU (scanned PDFs)", "mineru"),
+                        ("Auto (detect best engine)", "auto"),
+                        ("pymupdf4llm — Fast, no GPU (clean PDFs)", "pymupdf4llm"),
+                        ("MinerU — Scanned / complex PDFs", "mineru"),
+                        ("Marker — High quality (8GB VRAM)", "marker"),
                     ],
                     id="ocr_mode_select",
                     value="auto",
@@ -856,6 +1046,7 @@ class AxiomLMApp(App):
                     highlight_cursor_line=False,
                     placeholder="Ask a question (Enter to send, Shift+Enter for newline)...",
                 )
+                yield TuningPanel(TOP_K_RESULTS, DISTANCE_THRESHOLD)
 
         yield Footer()
 
@@ -867,6 +1058,31 @@ class AxiomLMApp(App):
         
         self._render_mascot()
         self._refresh_models()
+        self._sync_tuning_panel()
+
+    def watch_top_k_results(self, value: int) -> None:
+        self._sync_tuning_panel()
+
+    def watch_distance_threshold(self, value: float) -> None:
+        self._sync_tuning_panel()
+
+    def on_tuning_panel_topk_changed(self, message: TuningPanel.TopkChanged) -> None:
+        self._apply_top_k_change(message.value)
+
+    def _apply_top_k_change(self, value: int) -> None:
+        self.top_k_results = max(TuningPanel.TOP_K_MIN, min(TuningPanel.TOP_K_MAX, int(value)))
+
+    def on_tuning_panel_distance_changed(self, message: TuningPanel.DistanceChanged) -> None:
+        self.distance_threshold = max(
+            TuningPanel.DIST_MIN,
+            min(TuningPanel.DIST_MAX, round(float(message.value), 2)),
+        )
+
+    def _sync_tuning_panel(self) -> None:
+        if not self.is_mounted:
+            return
+        panel = self.query_one("#query_tuning", TuningPanel)
+        panel.set_values(self.top_k_results, self.distance_threshold)
 
     async def _populate_sidebar(self) -> None:
         book_list = self.query_one("#book_list", ListView)
@@ -1039,8 +1255,8 @@ class AxiomLMApp(App):
             collection = get_collection(book_stem)
             results = collection.query(
                 query_embeddings=[q_vec],
-                n_results=TOP_K_RESULTS,
-                include=["documents", "metadatas"],
+                n_results=self.top_k_results,
+                include=["documents", "metadatas", "distances"],
             )
 
             if self._is_query_cancelled(request_id):
@@ -1049,11 +1265,20 @@ class AxiomLMApp(App):
 
             context_blocks = []
             metadatas: list[dict] = []
-            has_retrieved_context = bool(results["documents"] and results["documents"][0])
+            retrieved_docs = results.get("documents") or [[]]
+            retrieved_meta = results.get("metadatas") or [[]]
+            retrieved_distances = results.get("distances") or [[]]
+            has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
             if has_retrieved_context:
-                chunks = results["documents"][0]
-                metadatas = results["metadatas"][0]
-                for chunk, meta in zip(chunks, metadatas):
+                chunks = retrieved_docs[0]
+                raw_metadatas = retrieved_meta[0] if retrieved_meta else []
+                distances = retrieved_distances[0] if retrieved_distances else []
+                for idx, (chunk, meta) in enumerate(zip(chunks, raw_metadatas)):
+                    if idx < len(distances):
+                        distance = distances[idx]
+                        if isinstance(distance, (int, float)) and distance >= self.distance_threshold:
+                            continue
+                    metadatas.append(meta)
                     h1 = meta.get("Header 1", "Unknown Chapter")
                     h2 = meta.get("Header 2", "Unknown Section")
                     page_info = meta.get("page", "N/A")
@@ -1432,10 +1657,6 @@ class AxiomLMApp(App):
             step = max(0.2, (target - current) * 0.16)
             current = min(target, current + step)
             progress.update(progress=current)
-        elif current < 99:
-            # Keep a subtle heartbeat so the UI feels alive during long operations.
-            progress.update(advance=0.05)
-            current = progress.progress if progress.progress is not None else current
 
         eta_label = self.query_one("#parse_status_eta", Label)
         if self._parse_started_at is None or current < 1:
@@ -1479,7 +1700,8 @@ class AxiomLMApp(App):
         self._set_parse_controls_enabled(False)
         requested_engine = {
             "auto": "Auto (choosing best engine...)",
-            "marker": "Marker",
+            "pymupdf4llm": "pymupdf4llm",
+            "marker": "Marker (8GB VRAM)",
             "mineru": "MinerU",
         }.get(mode_value, mode_value)
         self._set_parse_runtime_status(
@@ -1502,10 +1724,13 @@ class AxiomLMApp(App):
 
     def _parse_and_index_worker(self, pdf_path: str, mode: str) -> None:
         try:
-            from src.indexer import index_book
-            from src.ocr import resolve_mode, route
+            from src import checkpoint
+            from src.ocr import resolve_mode
 
             pdf = Path(pdf_path)
+            run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            logs_dir = LOGS_DIR
+            logs_dir.mkdir(parents=True, exist_ok=True)
             self.call_from_thread(
                 self._set_parse_runtime_status,
                 stage="Releasing GPU memory",
@@ -1515,35 +1740,402 @@ class AxiomLMApp(App):
             self._release_ollama_models()
 
             resolved_mode, reason = resolve_mode(pdf, mode)
-            engine_label = "Marker" if resolved_mode == "marker" else "MinerU"
+            if resolved_mode == "mineru" and not self._is_mineru_available():
+                if mode == "auto":
+                    resolved_mode = "pymupdf4llm"
+                    reason = (
+                        f"{reason}; MinerU unavailable, falling back to pymupdf4llm "
+                        "(install with: uv pip install mineru)"
+                    )
+                else:
+                    raise RuntimeError(
+                        "MinerU mode selected but MinerU is not installed. "
+                        "Install with: uv pip install mineru"
+                    )
+
+            gpu_note = self._gpu_runtime_note()
+            total_pages = self._pdf_page_count(pdf)
+            parse_env = self._build_parse_env()
+            engine_label = {
+                "pymupdf4llm": "pymupdf4llm",
+                "marker": "Marker (8GB VRAM)",
+                "mineru": "MinerU",
+            }.get(resolved_mode, resolved_mode)
             if mode == "auto":
                 engine_label = f"{engine_label} (auto)"
+            detail_base = f"{reason} | {gpu_note}"
             self.call_from_thread(
                 self._set_parse_runtime_status,
                 stage="Parsing PDF pages",
                 engine=engine_label,
-                detail=reason,
-                target_progress=72.0,
+                detail=detail_base,
+                target_progress=20.0,
             )
 
-            pages = route(pdf, mode=resolved_mode, force=False)
+            ocr_cmd = [
+                sys.executable,
+                "-u",
+                "-m",
+                "src.ocr",
+                "--pdf",
+                str(pdf),
+                "--mode",
+                resolved_mode,
+            ]
+            ocr_progress_floor = 12.0
+            ocr_progress_ceiling = 90.0
+            last_ocr_progress = 20.0
+            page_line_pattern = re.compile(r"page\s+(\d{1,6})", flags=re.IGNORECASE)
+
+            def on_ocr_output(line: str) -> None:
+                nonlocal last_ocr_progress
+                stripped = line.strip()
+                if not stripped:
+                    return
+
+                trimmed = stripped if len(stripped) <= 180 else f"{stripped[:177]}..."
+                progress = last_ocr_progress
+
+                page_match = page_line_pattern.search(stripped)
+                if page_match and total_pages > 0:
+                    page_idx = int(page_match.group(1))
+                    ratio = min(1.0, max(0.0, (page_idx + 1) / total_pages))
+                    progress = ocr_progress_floor + (ocr_progress_ceiling - ocr_progress_floor) * ratio
+                    progress = max(last_ocr_progress, progress)
+                    last_ocr_progress = progress
+
+                self.call_from_thread(
+                    self._set_parse_runtime_status,
+                    detail=f"{detail_base} | {trimmed}",
+                    target_progress=progress,
+                )
+
+            ocr_log = logs_dir / f"{pdf.stem}_{run_stamp}_ocr.log"
+            self._write_stage_log(ocr_log, ocr_cmd, parse_env, "")
+            ocr_timeout = self._ocr_timeout_seconds(resolved_mode)
+            ocr_code, ocr_output = self._run_external_job(
+                ocr_cmd,
+                env=parse_env,
+                on_output=on_ocr_output,
+                live_log_path=ocr_log,
+                timeout_seconds=ocr_timeout,
+            )
+            if ocr_code != 0:
+                raise RuntimeError(
+                    f"{self._format_external_failure('OCR', ocr_code, ocr_output)} (log: {ocr_log})"
+                )
+            page_count = len(checkpoint.all_pages(pdf.stem))
+
             self.call_from_thread(
                 self._set_parse_runtime_status,
                 stage="Indexing chunks",
-                detail=f"Parsed {len(pages)} pages. Building embeddings...",
+                detail=f"Parsed {page_count} pages. Building embeddings... | {gpu_note}",
                 target_progress=96.0,
             )
-            chunks = index_book(pdf.stem, reindex=True)
+            index_cmd = [
+                sys.executable,
+                "-u",
+                "-m",
+                "src.indexer",
+                pdf.stem,
+                "--reindex",
+            ]
+            index_log = logs_dir / f"{pdf.stem}_{run_stamp}_index.log"
+            self._write_stage_log(index_log, index_cmd, parse_env, "")
+            index_code, index_output = self._run_external_job(
+                index_cmd,
+                env=parse_env,
+                live_log_path=index_log,
+                timeout_seconds=INDEX_TIMEOUT_SECONDS,
+            )
+            if index_code != 0:
+                raise RuntimeError(
+                    f"{self._format_external_failure('Indexing', index_code, index_output)} (log: {index_log})"
+                )
+
+            chunks = self._extract_indexed_chunk_count(index_output)
+            if chunks <= 0:
+                try:
+                    chunks = get_collection(pdf.stem).count()
+                except Exception:
+                    chunks = 0
+
             self.call_from_thread(
                 self._set_parse_runtime_status,
                 stage="Finalizing",
-                detail=f"Indexed {chunks} chunks.",
+                detail=f"Indexed {chunks} chunks. Logs: {index_log.name}",
                 target_progress=100.0,
             )
-            self.call_from_thread(self._finish_parse_and_index, pdf.stem, len(pages), chunks, "")
+            self.call_from_thread(
+                self._finish_parse_and_index,
+                pdf.stem,
+                page_count,
+                chunks,
+                "",
+            )
         except Exception as exc:
             detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
-            self.call_from_thread(self._finish_parse_and_index, "", 0, 0, f"{exc.__class__.__name__}: {detail}")
+            book_stem = Path(pdf_path).stem if pdf_path else ""
+            self.call_from_thread(
+                self._finish_parse_and_index,
+                book_stem,
+                0,
+                0,
+                f"{exc.__class__.__name__}: {detail}",
+            )
+
+    @staticmethod
+    def _is_mineru_available() -> bool:
+        if importlib.util.find_spec("magic_pdf") is not None:
+            return True
+        if importlib.util.find_spec("mineru") is not None:
+            return True
+        return False
+
+    @staticmethod
+    def _project_root() -> Path:
+        return Path(__file__).resolve().parent.parent
+
+    def _run_external_job(
+        self,
+        command: list[str],
+        env: dict[str, str] | None = None,
+        on_output: Callable[[str], None] | None = None,
+        live_log_path: Path | None = None,
+        timeout_seconds: int | None = None,
+    ) -> tuple[int, str]:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(self._project_root()),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1,
+            env=env,
+            start_new_session=True,
+        )
+        lines: list[str] = []
+        log_handle = live_log_path.open("a", encoding="utf-8") if live_log_path is not None else None
+        line_queue: Queue[str | None] = Queue()
+        timed_out = False
+        timeout_at = (
+            time.monotonic() + float(timeout_seconds)
+            if timeout_seconds is not None and timeout_seconds > 0
+            else None
+        )
+
+        def _reader() -> None:
+            if proc.stdout is None:
+                line_queue.put(None)
+                return
+            try:
+                for raw_line in proc.stdout:
+                    line_queue.put(raw_line.rstrip())
+            finally:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                line_queue.put(None)
+
+        reader = Thread(target=_reader, daemon=True)
+        reader.start()
+
+        try:
+            while True:
+                if timeout_at is not None and time.monotonic() >= timeout_at:
+                    timed_out = True
+                    timeout_msg = (
+                        f"Timed out after {int(timeout_seconds)}s; "
+                        "sending SIGTERM to OCR process group."
+                    )
+                    lines.append(timeout_msg)
+                    if log_handle is not None:
+                        log_handle.write(f"{timeout_msg}\n")
+                        log_handle.flush()
+                    if on_output is not None:
+                        on_output(timeout_msg)
+                    self._terminate_process_group(proc)
+                    break
+
+                wait_seconds = 0.5
+                if timeout_at is not None:
+                    wait_seconds = max(0.05, min(wait_seconds, timeout_at - time.monotonic()))
+                try:
+                    line = line_queue.get(timeout=wait_seconds)
+                except Empty:
+                    if proc.poll() is not None and not reader.is_alive():
+                        break
+                    continue
+
+                if line is None:
+                    break
+                if not line:
+                    continue
+                lines.append(line)
+                if log_handle is not None:
+                    log_handle.write(f"{line}\n")
+                    log_handle.flush()
+                if on_output is not None:
+                    on_output(line)
+
+            if timed_out:
+                try:
+                    returncode = proc.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    self._kill_process_group(proc)
+                    returncode = proc.wait()
+            else:
+                returncode = proc.wait()
+        finally:
+            if log_handle is not None:
+                log_handle.close()
+        output = "\n".join(lines)
+        return returncode, output
+
+    @staticmethod
+    def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _kill_process_group(proc: subprocess.Popen[str]) -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _ocr_timeout_seconds(mode: str) -> int:
+        normalized = mode.strip().lower()
+        if normalized == "mineru":
+            return MINERU_OCR_TIMEOUT_SECONDS
+        if normalized == "marker":
+            return MARKER_OCR_TIMEOUT_SECONDS
+        return PYMUPDF4LLM_OCR_TIMEOUT_SECONDS
+
+    @staticmethod
+    def _write_stage_log(
+        log_path: Path,
+        command: list[str],
+        env: dict[str, str] | None,
+        output: str,
+    ) -> None:
+        redacted_env = {}
+        if env:
+            for key in (
+                "AXIOM_EMBED_DEVICE",
+                "CUDA_VISIBLE_DEVICES",
+                "PYTHONUNBUFFERED",
+                "PYTORCH_CUDA_ALLOC_CONF",
+            ):
+                if key in env:
+                    redacted_env[key] = env[key]
+        content = [
+            f"command: {' '.join(command)}",
+            f"env: {redacted_env}",
+            "",
+            output.strip(),
+            "",
+        ]
+        log_path.write_text("\n".join(content), encoding="utf-8")
+
+    @staticmethod
+    def _build_parse_env() -> dict[str, str]:
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        if AxiomLMApp._torch_cuda_available():
+            env["AXIOM_EMBED_DEVICE"] = "cuda"
+            env.setdefault("CUDA_VISIBLE_DEVICES", "0")
+        else:
+            env["AXIOM_EMBED_DEVICE"] = "cpu"
+        return env
+
+    @staticmethod
+    def _torch_cuda_available() -> bool:
+        try:
+            import torch
+            return torch.cuda.is_available()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _pdf_page_count(pdf_path: Path) -> int:
+        try:
+            import fitz
+        except Exception:
+            return 0
+
+        doc = fitz.open(str(pdf_path))
+        try:
+            return len(doc)
+        finally:
+            doc.close()
+
+    @staticmethod
+    def _nvidia_gpu_present() -> bool:
+        try:
+            probe = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return probe.returncode == 0 and bool(probe.stdout.strip())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _gpu_runtime_note() -> str:
+        if AxiomLMApp._torch_cuda_available():
+            return "GPU acceleration active"
+        if AxiomLMApp._nvidia_gpu_present():
+            return "NVIDIA GPU detected but Torch is CPU-only (install CUDA torch wheel)"
+        return "No CUDA GPU runtime detected"
+
+    @staticmethod
+    def _extract_indexed_chunk_count(output: str) -> int:
+        match = re.search(r"embedded\s+(\d+)\s+chunks", output, flags=re.IGNORECASE)
+        return int(match.group(1)) if match else 0
+
+    @staticmethod
+    def _format_external_failure(stage: str, returncode: int, output: str) -> str:
+        if returncode < 0:
+            status = f"terminated by signal {-returncode}"
+        else:
+            status = f"exit code {returncode}"
+
+        if not output.strip():
+            return f"{stage} failed ({status})."
+
+        lines = [line.strip() for line in output.strip().splitlines() if line.strip()]
+        priority_patterns = (
+            "cuda out of memory",
+            "outofmemoryerror",
+            "runtimeerror:",
+            "error:",
+            "timed out after",
+            "marker gpu oom",
+            "failed",
+        )
+
+        for pattern in priority_patterns:
+            for line in reversed(lines):
+                if pattern in line.lower():
+                    return f"{stage} failed ({status}). {line}"
+
+        tail = "\n".join(lines[-6:])
+        return f"{stage} failed ({status}). {tail}"
 
     def _release_ollama_models(self) -> None:
         """Unload currently loaded Ollama models so OCR has free VRAM."""
@@ -1597,6 +2189,9 @@ class AxiomLMApp(App):
         self.query_one("#query_input", QueryComposer).focus()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.has_class("tune-btn"):
+            return
+
         if event.button.has_class("book-delete-btn"):
             event.stop()
             current = event.button.parent
