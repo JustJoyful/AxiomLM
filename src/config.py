@@ -77,3 +77,13 @@ AUTO_OCR_SAMPLE_PAGES = 8
 AUTO_OCR_TEXT_CHAR_THRESHOLD = 180
 AUTO_OCR_IMAGE_COVERAGE_THRESHOLD = 0.45
 AUTO_OCR_SCANNED_PAGE_RATIO_THRESHOLD = 0.50
+
+
+def ensure_directories():
+    """Ensure all required data directories exist on disk."""
+    for path in [DATA, RAW_PDFS, CLEAN_IMGS, PARSED_MD, CHECKPOINTS, VECTOR_STORE, LOGS_DIR]:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+# Auto-initialize on import so scripts don't crash on missing paths
+ensure_directories()

@@ -2457,5 +2457,9 @@ class AxiomLMApp(App):
         )
         mascot_widget.update(Text(logo, style="bold ansi_cyan"))
                                                          
+def main():
+    app = AxiomLMApp()
+    app.run()
+
 if __name__ == "__main__":
-    AxiomLMApp().run()
+    main()
