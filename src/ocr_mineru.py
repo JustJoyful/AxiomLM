@@ -140,7 +140,10 @@ def _run_mineru_cli(
             raise RuntimeError("MinerU produced no markdown output.")
         candidates = [max(md_files, key=lambda p: p.stat().st_size)]
 
-    return candidates[0].read_text(encoding="utf-8")
+    json_candidates = list(output_dir.rglob(f"{stem}_content_list.json"))
+    json_path = json_candidates[0] if json_candidates else None
+    
+    return candidates[0].read_text(encoding="utf-8"), json_path
 
 
 def run(pdf_path: Path, force: bool = False) -> list[Path]:
@@ -188,7 +191,7 @@ def run(pdf_path: Path, force: bool = False) -> list[Path]:
         start_page: int | None = None,
         end_page: int | None = None,
         tmp_dir: Path | None = None,
-    ) -> str:
+    ) -> tuple[str, Path | None]:
         """Try each backend in order; raise the last error if all fail."""
         last_exc: Exception | None = None
         _tmp_dir = tmp_dir or Path(tempfile.mkdtemp(prefix="axiom_mineru_"))
@@ -235,22 +238,67 @@ def run(pdf_path: Path, force: bool = False) -> list[Path]:
             tmp_dir = Path(tmp_str)
             for batch_start in range(first_page, total_pages, MINERU_BATCH_PAGES):
                 batch_end = min(total_pages - 1, batch_start + MINERU_BATCH_PAGES - 1)
-                batch_md = _run_with_fallback(
+                batch_md, batch_json_path = _run_with_fallback(
                     start_page=batch_start,
                     end_page=batch_end,
                     tmp_dir=tmp_dir,
                 )
-                batch_pages = batch_md.split("\f") if "\f" in batch_md else [batch_md]
+                
+                # Heuristic page splitting using MinerU's content_list.json
+                batch_pages = []
+                if batch_json_path and batch_json_path.exists():
+                    try:
+                        import json
+                        with open(batch_json_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        
+                        # Find the first unique text snippet of each page in the JSON
+                        page_markers = {}
+                        for item in data:
+                            p_idx = item.get("page_idx")
+                            text = item.get("text", "").strip()
+                            if p_idx is not None and text and len(text) > 20: # skip short noise
+                                if p_idx not in page_markers:
+                                    page_markers[p_idx] = text
+                        
+                        # Split full markdown based on these markers
+                        sorted_pages = sorted(page_markers.keys())
+                        current_md = batch_md
+                        for i in range(len(sorted_pages)):
+                            curr_page = sorted_pages[i]
+                            if i + 1 < len(sorted_pages):
+                                next_marker = page_markers[sorted_pages[i+1]]
+                                # Try to find where the next page starts
+                                split_pos = current_md.find(next_marker)
+                                if split_pos != -1:
+                                    batch_pages.append(current_md[:split_pos].replace("\f", ""))
+                                    current_md = current_md[split_pos:]
+                                else:
+                                    # Marker not found (maybe formula conversion), try a shorter snippet
+                                    short_marker = next_marker[:40]
+                                    split_pos = current_md.find(short_marker)
+                                    if split_pos != -1:
+                                        batch_pages.append(current_md[:split_pos].replace("\f", ""))
+                                        current_md = current_md[split_pos:]
+                                    else:
+                                        # Give up on this split, we'll merge this page into the next
+                                        pass
+                        batch_pages.append(current_md.replace("\f", ""))
+                    except Exception as e:
+                        print(f"  ⚠ Failed to parse JSON map: {e}. Falling back to standard split.")
+                        batch_pages = batch_md.split("\f") if "\f" in batch_md else [batch_md]
+                else:
+                    batch_pages = batch_md.split("\f") if "\f" in batch_md else [batch_md]
+
                 expected = batch_end - batch_start + 1
-                # Trim trailing blank pages that MinerU sometimes appends
                 while len(batch_pages) > expected and not batch_pages[-1].strip():
                     batch_pages.pop()
-                # Warn but don't abort — MinerU may split scanned pages differently
+                    
                 if len(batch_pages) != expected:
                     print(
-                        f"  ⚠  MinerU returned {len(batch_pages)} page(s) for range "
+                        f"  ⚠ MinerU returned {len(batch_pages)} page(s) for range "
                         f"{batch_start + 1}–{batch_end + 1} (expected {expected}); "
-                        "continuing with what was produced."
+                        "Aura may be slightly shifted."
                     )
 
                 for offset, page_text in enumerate(batch_pages):

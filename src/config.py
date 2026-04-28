@@ -35,7 +35,9 @@ EMBED_MODEL   = "jinaai/jina-embeddings-v5-text-nano"
 # Device selection for sentence-transformers embeddings:
 #   "auto" => cuda if available, otherwise cpu
 #   "cuda" / "cpu" => force device
-EMBED_DEVICE  = "auto"
+# Force CPU for embeddings to save precious VRAM for MinerU and Ollama.
+# Jina-v5-nano is fast enough on CPU.
+EMBED_DEVICE  = "cpu"
 
 # ── Chunking & retrieval ──────────────────────────────────────────────────────
 CHUNK_SIZE    = 800    # target tokens per chunk
@@ -43,9 +45,8 @@ CHUNK_OVERLAP = 100    # overlap tokens between adjacent chunks
 TOP_K_RESULTS = 5      # top-k chunks retrieved per query (live-tunable in TUI)
 
 # ChromaDB returns DISTANCE (lower = more similar), not similarity.
-# Keep chunks with distance < DISTANCE_THRESHOLD.
-# Example (cosine distance): 0.75 distance ~= 0.25 similarity (permissive).
-DISTANCE_THRESHOLD = 0.75
+# Loosened to 1.5 because Jina-v5-nano results often fall between 0.8 and 1.2.
+DISTANCE_THRESHOLD = 1.5
 
 # ── MinerU VRAM guard ─────────────────────────────────────────────────────────
 # Minimum free VRAM (GB) before MinerU mode is allowed to proceed.

@@ -21,6 +21,7 @@ from typing import Callable
 from uuid import uuid4
 
 from httpx import Client, ConnectError, HTTPStatusError, ReadTimeout
+from rich.markdown import Markdown as RichMarkdown
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -38,6 +39,7 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    Markdown,
     ProgressBar,
     Select,
     Static,
@@ -65,71 +67,135 @@ from src.clipboard import copy_to_clipboard, extract_code_blocks
 from src.db import delete_collection, embed_query, get_collection, list_collections
 
 
-PROMPT_TEMPLATE = """You are Axie, a study companion for engineering students in a terminal UI.
-Your response is shown in a Rich-friendly terminal, so keep formatting clean and structured.
+def latex_to_unicode(text: str) -> str:
+    """
+    Post-process response to replace LaTeX math with readable Unicode symbols.
+    Strips $$ and $ delimiters and handles common symbols/notations.
+    """
+    # 1. Strip structural delimiters and sizing commands
+    text = re.sub(r"\$\$(.+?)\$\$", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"\$(.+?)\$", r"\1", text)
+    text = re.sub(r"\\left\s*|\\right\s*|\\big\s*|\\Big\s*|\\bigg\s*|\\Bigg\s*", "", text)
+    text = re.sub(r"\\text\s*\{\s*(.+?)\s*\}", r"\1", text)
+
+    # 2. Symbol replacements (Comprehensive Math/Science library)
+    # Using \s* to handle cases where the LLM adds spaces inside LaTeX commands
+    replacements = {
+        # Fractions and basic
+        r"\\frac\s*\{\s*(.+?)\s*\}\s*\{\s*(.+?)\s*\}": lambda m: f"({m.group(1)})/({m.group(2)})",
+        r"\\sqrt\s*\{\s*(.+?)\s*\}": lambda m: f"√({m.group(1)})",
+        r"\\cdot\b": "·",
+        r"\\times\b": "×",
+        r"\\pm\b": "±",
+        r"\\mp\b": "∓",
+        r"\\div\b": "÷",
+
+        # Comparison
+        r"\\leq\b": "≤",
+        r"\\geq\b": "≥",
+        r"\\neq\b": "≠",
+        r"\\approx\b": "≈",
+        r"\\cong\b": "≅",
+        r"\\equiv\b": "≡",
+        r"\\propto\b": "∝",
+        r"\\ll\b": "≪",
+        r"\\gg\b": "≫",
+
+        # Greek Lowercase
+        r"\\alpha\b": "α", r"\\beta\b": "β", r"\\gamma\b": "γ", r"\\delta\b": "δ",
+        r"\\epsilon\b": "ε", r"\\zeta\b": "ζ", r"\\eta\b": "η", r"\\theta\b": "θ",
+        r"\\iota\b": "ι", r"\\kappa\b": "κ", r"\\lambda\b": "λ", r"\\mu\b": "μ",
+        r"\\nu\b": "ν", r"\\xi\b": "ξ", r"\\pi\b": "π", r"\\rho\b": "ρ",
+        r"\\sigma\b": "σ", r"\\tau\b": "τ", r"\\upsilon\b": "υ", r"\\phi\b": "φ",
+        r"\\chi\b": "χ", r"\\psi\b": "ψ", r"\\omega\b": "ω",
+
+        # Greek Uppercase
+        r"\\Gamma\b": "Γ", r"\\Delta\b": "Δ", r"\\Theta\b": "Θ", r"\\Lambda\b": "Λ",
+        r"\\Xi\b": "Ξ", r"\\Pi\b": "Π", r"\\Sigma\b": "Σ", r"\\Upsilon\b": "Υ",
+        r"\\Phi\b": "Φ", r"\\Psi\b": "Ψ", r"\\Omega\b": "Ω",
+
+        # Math Symbols
+        r"\\sum\b": "∑",
+        r"\\int\b": "∫",
+        r"\\prod\b": "∏",
+        r"\\infty\b": "∞",
+        r"\\partial\b": "∂",
+        r"\\nabla\b": "∇",
+        r"\\angle\b": "∠",
+        r"\\triangle\b": "△",
+        r"\\hbar\b": "ħ",
+
+        # Set theory & Logic
+        r"\\in\b": "∈",
+        r"\\notin\b": "∉",
+        r"\\forall\b": "∀",
+        r"\\exists\b": "∃",
+        r"\\cap\b": "∩",
+        r"\\cup\b": "∪",
+        r"\\subset\b": "⊂",
+        r"\\subseteq\b": "⊆",
+        r"\\supset\b": "⊃",
+        r"\\supseteq\b": "⊇",
+        r"\\emptyset\b": "∅",
+        r"\\land\b": "∧",
+        r"\\lor\b": "∨",
+        r"\\neg\b": "¬",
+
+        # Arrows
+        r"\\rightarrow\b": "→",
+        r"\\Rightarrow\b": "⇒",
+        r"\\leftarrow\b": "←",
+        r"\\Leftarrow\b": "⇐",
+        r"\\leftrightarrow\b": "↔",
+        r"\\Leftrightarrow\b": "⇔",
+    }
+
+    for pattern, replacement in replacements.items():
+        text = re.sub(pattern, replacement, text)
+        text = re.sub(pattern, replacement, text)
+
+    # 3. Simple Subscripts and Superscripts (Common in Science)
+    sub_super = {
+        r"\^2\b": "²", r"\^3\b": "³", r"\^n\b": "ⁿ",
+        r"_2\b": "₂", r"_3\b": "₃", r"_4\b": "₄",
+        r"_n\b": "ₙ", r"_i\b": "ᵢ", r"_j\b": "ⱼ",
+        r"_x\b": "ₓ", r"_y\b": "ᵧ",
+    }
+    for pattern, replacement in sub_super.items():
+        text = re.sub(pattern, replacement, text)
+        text = re.sub(pattern, replacement, text)
+
+    return text
+
+
+PROMPT_TEMPLATE = """You are Axie, a study assistant built into a terminal UI. Responses render in a Rich-enabled terminal supporting markdown tables and markup.
+
+Important: You have access to conversation history below. Use it to understand references like "this topic", "that exercise", or "the previous example". If a follow-up question is asked and the history makes the intent clear, use the retrieved context to answer even if it seems tangential.
 
 Formatting rules:
-- Use markdown tables for comparisons, definitions, or structured properties.
-- Use **bold** for key terms and important values.
-- Use `code` for inline equations or symbols, and $$...$$ for display math.
-- Use numbered lists for steps/derivations and bullet lists for properties.
-- Keep answers dense and scannable (study notes style, not essay style).
-- End with a compact citation line (one line only).
+- Use **bold** for key terms and important values
+- Use `code` for inline code/symbols, triple backticks for code blocks with language tag
+- Avoid LaTeX commands like \frac, \left, \right, or \text. Use plain notation like P(A∩B)/P(A).
+- Use a simple pipe | or forward slash / for math. NEVER use backslashes followed by spaces or slashes (like \ /).
+- If the user asks for examples/questions, prioritize any retrieved sections titled 'Illustrative Examples', 'Exercises', or 'Solved Problems'.
+- Use the pipe symbol | for conditional probability, e.g., P(B|A). Never use fractions for this.
+- For Chemistry, use subscripts like H₂O or CO₂. For Physics, use common superscripts like m/s² when possible.
+- Use numbered lists for steps/derivations, bullet lists for properties
+- Use markdown tables for comparisons, definitions, structured data
+- Keep answers dense and scannable — study notes style, not essay style
 
-Structure policy:
-- If asked to compare or list multiple items, prefer a table.
-- If asked to explain a process/proof, use numbered steps.
-- If asked what something is, give one sharp paragraph then concise supporting detail.
+Conversation history (use this to understand what we're discussing):
+{history}
 
-Source citation (last line only):
-[{book} · {chapter} · p.{pages}]
-If you supplement outside context, append: [+ general knowledge]
-
-Context from {book}:
+Retrieved context from {book}:
 {context}
 
-Question: {question}
+Current question: {question}
 
-Answer:"""
+Answer in study notes style. Never refuse due to missing context — always provide the best answer you can with available information.
 
-FALLBACK_PROMPT_TEMPLATE = """You are Axie, a study companion for engineering students.
-Answer directly using reliable general knowledge and any useful provided context.
-Do not refuse just because context is partial.
-
-Formatting rules:
-- Use markdown tables for structured comparisons when relevant.
-- Use numbered lists for derivations/processes.
-- Keep explanations concise, technical, and scannable.
-- Use `code` inline and $$...$$ for display math.
-
-End with a compact last line:
-[general knowledge] or [context + general knowledge]
-
-Question: {question}
-Context (optional):
-{context}
-
-Answer:"""
-
-ENFORCED_FALLBACK_PROMPT_TEMPLATE = """You are Axie, a study companion for engineering students.
-You must provide a best-effort answer.
-Do not refuse, do not mention missing context as a blocker, and do not say you cannot answer.
-If uncertain, state uncertainty briefly and still give the most likely explanation.
-
-Formatting rules:
-- Prefer tables for structured comparisons.
-- Prefer numbered steps for procedures/derivations.
-- Keep it concise, factual, and study-focused.
-- Use `code` inline and $$...$$ for display math.
-
-End with a compact last line:
-[general knowledge]
-
-Question: {question}
-Context (optional):
-{context}
-
-Answer:"""
+Citation (last line only):
+[{book} · {chapter} · p.{pages}]"""
 
 
 class QueryComposer(TextArea):
@@ -155,26 +221,6 @@ class QueryComposer(TextArea):
         self.insert("\n")
 
 
-class SelectableResponse(TextArea):
-    """Read-only response body that supports text selection and copy."""
-
-    BINDINGS = [
-        Binding("ctrl+a", "select_all", show=False, priority=True),
-    ]
-
-    def __init__(self, text: str = "", classes: str | None = None) -> None:
-        super().__init__(
-            text=text,
-            read_only=True,
-            # Preserve markdown table row alignment in terminal output.
-            soft_wrap=False,
-            tab_behavior="focus",
-            show_line_numbers=False,
-            compact=True,
-            highlight_cursor_line=False,
-            classes=classes,
-        )
-
 
 class UserMessage(Static):
     """Styled chat block for user messages."""
@@ -193,6 +239,7 @@ class UserMessage(Static):
     }
     UserMessage .message-content {
         color: ansi_white;
+        height: auto;
     }
     """
 
@@ -202,7 +249,7 @@ class UserMessage(Static):
 
     def compose(self) -> ComposeResult:
         yield Label("You", classes="message-label")
-        yield Static(self._content, classes="message-content")
+        yield Static(RichMarkdown(self._content), classes="message-content")
 
 
 class AssistantMessage(Static):
@@ -238,7 +285,6 @@ class AssistantMessage(Static):
         margin: 0;
         padding: 0;
         height: auto;
-        min-height: 1;
     }
 
     AssistantMessage .message-telemetry {
@@ -297,7 +343,7 @@ class AssistantMessage(Static):
 
     def compose(self) -> ComposeResult:
         yield Label("", classes="message-label")
-        yield SelectableResponse("", classes="message-content")
+        yield Static("", classes="message-content")
         yield Label("", classes="message-telemetry")
         with Horizontal(classes="message-toolbar"):
             yield Button("📋 Copy", classes="copy-btn copy-full-btn")
@@ -327,7 +373,7 @@ class AssistantMessage(Static):
         if not self.is_mounted:
             return
         label = self.query_one(".message-label", Label)
-        body = self.query_one(".message-content", SelectableResponse)
+        body = self.query_one(".message-content", Static)
         telemetry = self.query_one(".message-telemetry", Label)
         toolbar = self.query_one(".message-toolbar", Horizontal)
         copy_status = self.query_one(".copy-status", Label)
@@ -335,7 +381,7 @@ class AssistantMessage(Static):
         if self.thinking:
             suffix = "." * (self.dots % 4)
             label.update(f"AxiomLM{suffix}")
-            body.load_text("")
+            body.update("")
             telemetry.update("")
             telemetry.remove_class("visible")
             toolbar.remove_class("visible")
@@ -344,7 +390,7 @@ class AssistantMessage(Static):
 
         if self._is_error:
             label.update("AxiomLM Error")
-            body.load_text(self._content)
+            body.update(self._content)
             telemetry.update("")
             telemetry.remove_class("visible")
             toolbar.remove_class("visible")
@@ -352,7 +398,7 @@ class AssistantMessage(Static):
             return
 
         label.update("AxiomLM")
-        body.load_text(self._content)
+        body.update(RichMarkdown(self._content))
         toolbar.add_class("visible")
         if self._telemetry_badge:
             telemetry.update(self._telemetry_badge)
@@ -826,6 +872,10 @@ class AxiomLMApp(App):
     #chat_scroll {
         height: 1fr;
         padding: 1 2 0 2;
+        scrollbar-size: 1 1;
+        scrollbar-color: ansi_cyan 35%;
+        scrollbar-color-hover: ansi_cyan;
+        scrollbar-color-active: ansi_bright_cyan;
     }
 
     #query_input {
@@ -998,6 +1048,10 @@ class AxiomLMApp(App):
         self._query_input_min_height = 3
         self._query_input_max_height = 8
 
+        # Conversation memory
+        self._conversation: list[dict[str, str]] = []
+        self._last_chunks: list[str] = []
+
     def compose(self) -> ComposeResult:
         yield Header()
 
@@ -1156,7 +1210,8 @@ class AxiomLMApp(App):
         composer = self.query_one("#query_input", QueryComposer)
         line_breaks = composer.text.count("\n")
         target = min(self._query_input_max_height, self._query_input_min_height + line_breaks)
-        composer.styles.height = target
+        if composer.styles.height != target:
+            composer.styles.height = target
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.control.id != "query_input":
@@ -1178,6 +1233,8 @@ class AxiomLMApp(App):
         chat_scroll = self.query_one("#chat_scroll", ScrollableContainer)
         await chat_scroll.remove_children("*")
         self._pending_assistants.clear()
+        self.conversation_history.clear()
+        self.last_chunks.clear()
 
     def action_copy_focused_message(self) -> None:
         focused = self.focused
@@ -1227,6 +1284,7 @@ class AxiomLMApp(App):
             self.notify("No active book selected. Please parse a PDF first.", severity="error")
             return
 
+        history_str = self._format_history()
         await self._append_chat_widget(UserMessage(query))
 
         request_id = uuid4().hex
@@ -1236,8 +1294,9 @@ class AxiomLMApp(App):
 
         active_book = self.active_collection_name
         model_name = self.selected_model or OLLAMA_MODEL
+
         worker = self.run_worker(
-            lambda: self.execute_rag_query(query, active_book, model_name, request_id),
+            lambda: self.execute_rag_query(query, history_str, active_book, model_name, request_id),
             thread=True,
             group="queries",
             exit_on_error=False,
@@ -1245,58 +1304,110 @@ class AxiomLMApp(App):
         self._active_query_worker = worker
         self._active_query_request_id = request_id
 
-    def execute_rag_query(self, query: str, book_stem: str, model_name: str, request_id: str) -> None:
+    def _format_history(self) -> str:
+        if not self._conversation:
+            return ""
+        lines = ["Conversation so far:"]
+        for turn in self._conversation[-6:]:  # last 3 exchanges
+            role = "User" if turn["role"] == "user" else "Axie"
+            lines.append(f"{role}: {turn['content']}")
+        return "\n".join(lines) + "\n"
+
+    def _is_followup(self, query: str) -> bool:
+        FOLLOWUP_SIGNALS = [
+            "this topic", "give me", "an example", "another", 
+            "that", "this", "same", "more", "elaborate", "explain further",
+            "it", "they", "them", "those"
+        ]
+        q = query.lower()
+        return any(s in q for s in FOLLOWUP_SIGNALS)
+
+    def execute_rag_query(self, query: str, history_str: str, book_stem: str, model_name: str, request_id: str) -> None:
         try:
             if self._is_query_cancelled(request_id):
                 self.call_from_thread(self._finalize_query_cancelled, request_id)
                 return
 
-            q_vec = embed_query(query)
-            collection = get_collection(book_stem)
-            results = collection.query(
-                query_embeddings=[q_vec],
-                n_results=self.top_k_results,
-                include=["documents", "metadatas", "distances"],
-            )
+            # Augment retrieval query with history if it's vague/short
+            retrieval_query = query
+            vague_terms = {"it", "this", "that", "they", "example", "question", "more", "explain", "help", "detail"}
+            query_words = set(query.lower().split())
+            is_vague = bool(query_words & vague_terms) or len(query_words) < 5
+            
+            if is_vague and self._conversation:
+                # Add context from the last user message to improve retrieval relevance
+                for msg in reversed(self._conversation):
+                    if msg["role"] == "user":
+                        # If the user is asking for examples/questions, broaden search significantly
+                        if any(term in query.lower() for term in ["example", "question", "exercise", "problem"]):
+                            retrieval_query = f"{msg['content']} illustrative examples exercises questions problems"
+                        else:
+                            prev_context = " ".join(msg["content"].split()[:20])
+                            retrieval_query = f"{prev_context} {query}"
+                        break
 
-            if self._is_query_cancelled(request_id):
-                self.call_from_thread(self._finalize_query_cancelled, request_id)
-                return
-
-            context_blocks = []
-            metadatas: list[dict] = []
-            retrieved_docs = results.get("documents") or [[]]
-            retrieved_meta = results.get("metadatas") or [[]]
-            retrieved_distances = results.get("distances") or [[]]
-            has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
-            if has_retrieved_context:
-                chunks = retrieved_docs[0]
-                raw_metadatas = retrieved_meta[0] if retrieved_meta else []
-                distances = retrieved_distances[0] if retrieved_distances else []
-                for idx, (chunk, meta) in enumerate(zip(chunks, raw_metadatas)):
-                    if idx < len(distances):
-                        distance = distances[idx]
-                        if isinstance(distance, (int, float)) and distance >= self.distance_threshold:
-                            continue
-                    metadatas.append(meta)
-                    h1 = meta.get("Header 1", "Unknown Chapter")
-                    h2 = meta.get("Header 2", "Unknown Section")
-                    page_info = meta.get("page", "N/A")
-                    context_blocks.append(f"[{h1} · {h2} · p.{page_info}]\n{chunk}")
-
-            if context_blocks:
-                prompt = PROMPT_TEMPLATE.format(
-                    book=book_stem,
-                    chapter=",".join(sorted({m.get("Header 1", "Unknown") for m in metadatas})),
-                    pages=",".join(sorted({str(m.get("page", "?")) for m in metadatas})),
-                    context="\n\n".join(context_blocks),
-                    question=query,
-                )
+            # Follow-up logic: Reuse chunks if signals detected
+            is_followup = self._is_followup(query)
+            if is_followup and self._last_chunks:
+                context_blocks = self._last_chunks
+                metadatas = [] # Metadata info might be lost but context is preserved
             else:
-                prompt = ENFORCED_FALLBACK_PROMPT_TEMPLATE.format(
-                    question=query,
-                    context="",
+                q_vec = embed_query(retrieval_query)
+                collection = get_collection(book_stem)
+                results = collection.query(
+                    query_embeddings=[q_vec],
+                    n_results=8,
+                    include=["documents", "metadatas", "distances"],
                 )
+                
+                context_blocks = []
+                metadatas = []
+                retrieved_docs = results.get("documents") or [[]]
+                retrieved_meta = results.get("metadatas") or [[]]
+                retrieved_distances = results.get("distances") or [[]]
+                has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
+                
+                if has_retrieved_context:
+                    chunks = retrieved_docs[0]
+                    raw_metadatas = retrieved_meta[0] if retrieved_meta else []
+                    distances = retrieved_distances[0] if retrieved_distances else []
+                    for idx, (chunk, meta) in enumerate(zip(chunks, raw_metadatas)):
+                        if idx < len(distances):
+                            distance = distances[idx]
+                            # Be more lenient for vague queries
+                            limit = self.distance_threshold * 1.4 if is_vague else self.distance_threshold
+                            if isinstance(distance, (int, float)) and distance >= limit:
+                                continue
+                        metadatas.append(meta)
+                        h1 = meta.get("Header 1", "Unknown Chapter")
+                        h2 = meta.get("Header 2", "Unknown Section")
+                        page_info = meta.get("page", "N/A")
+                        context_blocks.append(f"[{h1} · {h2} · p.{page_info}]\n{chunk}")
+                
+                # Store for future follow-ups
+                self._last_chunks = context_blocks
+
+            # DEBUG PRINTS
+            print(f"\n[DEBUG RAG] history_str: {history_str[:100]}...")
+            print(f"[DEBUG RAG] is_followup: {is_followup}")
+            print(f"[DEBUG RAG] context size: {len(context_blocks)} blocks")
+            if context_blocks:
+                print(f"[DEBUG RAG] context snippet: {context_blocks[0][:200]}...")
+            
+            prompt = PROMPT_TEMPLATE.format(
+                book=book_stem,
+                chapter=",".join(sorted({m.get("Header 1", "Unknown") for m in metadatas}))
+                if metadatas
+                else "General Knowledge",
+                pages=",".join(sorted({str(m.get("page", "?")) for m in metadatas}))
+                if metadatas
+                else "N/A",
+                history=history_str,
+                context="\n\n".join(context_blocks)
+                if context_blocks
+                else "No direct context retrieved from indexed files. Use your general knowledge.",
+                question=query,
+            )
 
             accumulated_response = ""
             inference_badge: str | None = None
@@ -1332,41 +1443,8 @@ class AxiomLMApp(App):
                 time.monotonic() - stream_started,
             )
 
-            used_general_knowledge = not context_blocks
-            if not accumulated_response.strip() or self._needs_general_knowledge_fallback(accumulated_response):
-                used_general_knowledge = True
-                fallback_prompt = FALLBACK_PROMPT_TEMPLATE.format(
-                    question=query,
-                    context="\n\n".join(context_blocks),
-                )
-                fallback_response, fallback_badge = self._run_non_stream_completion(
-                    model_name,
-                    fallback_prompt,
-                )
-                if fallback_response:
-                    accumulated_response = fallback_response
-                    inference_badge = fallback_badge or inference_badge
-
-            if not accumulated_response.strip() or self._needs_general_knowledge_fallback(accumulated_response):
-                used_general_knowledge = True
-                forced_response, forced_badge = self._run_non_stream_completion(
-                    model_name,
-                    ENFORCED_FALLBACK_PROMPT_TEMPLATE.format(
-                        question=query,
-                        context="\n\n".join(context_blocks),
-                    ),
-                )
-                if forced_response:
-                    accumulated_response = forced_response
-                    inference_badge = forced_badge or inference_badge
-
-            if not accumulated_response.strip():
-                accumulated_response = (
-                    "I couldn't generate a response right now. Please retry in a moment."
-                )
-
-            if used_general_knowledge:
-                accumulated_response = self._append_general_knowledge_tag(accumulated_response)
+            # Post-process for math rendering
+            accumulated_response = latex_to_unicode(accumulated_response)
 
             # Stream only the final response to avoid flashing an initial refusal.
             # Stream by completed lines so markdown tables/lists do not flicker mid-row.
@@ -1384,6 +1462,7 @@ class AxiomLMApp(App):
                 self._finalize_query,
                 request_id,
                 accumulated_response,
+                query,
                 False,
                 inference_badge,
             )
@@ -1408,7 +1487,7 @@ class AxiomLMApp(App):
                 )
             else:
                 detail = f"Ollama request failed ({exc.response.status_code}): {exc.response.reason_phrase}"
-            self.call_from_thread(self._finalize_query, request_id, detail, True)
+            self.call_from_thread(self._finalize_query, request_id, detail, query, True)
         except Exception as exc:
             if self._is_query_cancelled(request_id):
                 self.call_from_thread(self._finalize_query_cancelled, request_id)
@@ -1418,45 +1497,13 @@ class AxiomLMApp(App):
                 self._finalize_query,
                 request_id,
                 f"{exc.__class__.__name__}: {detail}",
+                query,
                 True,
             )
 
     def _is_query_cancelled(self, request_id: str) -> bool:
         return request_id in self._cancelled_query_ids
 
-    def _needs_general_knowledge_fallback(self, response: str) -> bool:
-        normalized = response.strip().lower()
-        if not normalized:
-            return False
-        refusal_markers = (
-            "provided text does not contain",
-            "unable to answer this question from the given context",
-            "cannot answer from the given context",
-            "not covered in the loaded documents",
-            "insufficient context",
-            "given context does not",
-            "not enough information in the context",
-            "i do not have enough information",
-            "i don't have enough information",
-            "cannot answer that based on the provided context",
-            "can't answer that based on the provided context",
-            "the context does not provide",
-            "no relevant information provided",
-        )
-        return any(marker in normalized for marker in refusal_markers)
-
-    def _append_general_knowledge_tag(self, response: str) -> str:
-        existing_markers = (
-            "[Supplemented from general knowledge]",
-            "[+ general knowledge]",
-        )
-        if any(marker.lower() in response.lower() for marker in existing_markers):
-            return response
-        tag = "[+ general knowledge]"
-        stripped = response.rstrip()
-        if not stripped:
-            return tag
-        return f"{stripped}\n\n{tag}"
 
     def _iter_display_chunks(self, response: str) -> list[str]:
         if not response:
@@ -2360,9 +2407,18 @@ class AxiomLMApp(App):
         self,
         request_id: str,
         message: str,
+        query: str,
         is_error: bool,
         telemetry_badge: str | None = None,
     ) -> None:
+        if not is_error:
+            self._conversation.append({"role": "user", "content": query})
+            self._conversation.append({"role": "assistant", "content": message})
+            
+            # Keep only the last 10 messages (approx 5 turns) for context
+            if len(self._conversation) > 10:
+                self._conversation = self._conversation[-10:]
+
         await self._finalize_assistant_message(
             request_id,
             message,

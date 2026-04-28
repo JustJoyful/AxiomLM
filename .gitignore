@@ -67,4 +67,5 @@ ARCHITECTURE.md
 STACK.md
 IMPLEMENTATION_PLAN.md
 *copilot*
-.copilot/
+# Temporary test directories
+tmp_test/

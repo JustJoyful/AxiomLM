@@ -15,13 +15,14 @@ NOTE on jina-embeddings-v5-text-nano:
 """
 
 from __future__ import annotations
+import os
 from typing import List
 
 import chromadb
 from chromadb import EmbeddingFunction, Documents, Embeddings
 from sentence_transformers import SentenceTransformer
 
-from src.config import VECTOR_STORE, EMBED_MODEL
+from src.config import VECTOR_STORE, EMBED_DEVICE, EMBED_MODEL
 
 # ── Singletons ────────────────────────────────────────────────────────────────
 _CLIENT: chromadb.PersistentClient | None = None
@@ -39,10 +40,28 @@ def _get_model() -> SentenceTransformer:
     """Lazy-load the embedding model once and reuse across calls."""
     global _MODEL
     if _MODEL is None:
+        requested_device = os.getenv("AXIOM_EMBED_DEVICE", EMBED_DEVICE).strip().lower()
+        resolved_device = "cpu"
+        if requested_device == "cuda":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    resolved_device = "cuda"
+            except Exception:
+                resolved_device = "cpu"
+        elif requested_device == "auto":
+            try:
+                import torch
+                resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+            except Exception:
+                resolved_device = "cpu"
+        elif requested_device in {"cpu", "mps"}:
+            resolved_device = requested_device
+
         _MODEL = SentenceTransformer(
             EMBED_MODEL,
             trust_remote_code=True,
-            device="cpu",  # strict guard: keep VRAM free for Ollama/Gemma
+            device=resolved_device,
         )
     return _MODEL
 
