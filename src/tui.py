@@ -65,6 +65,10 @@ from .config import (
 )
 from .clipboard import copy_to_clipboard, extract_code_blocks
 from .db import delete_collection, embed_query, get_collection, list_collections
+from .page_querying import (
+    build_citation as build_page_citation,
+    extract_page_intent as parse_page_intent,
+)
 
 
 def latex_to_unicode(text: str) -> str:
@@ -1051,6 +1055,8 @@ class AxiomLMApp(App):
         # Conversation memory
         self._conversation: list[dict[str, str]] = []
         self._last_chunks: list[str] = []
+        self._last_retrieved_pages: list[int] = []
+        self._request_books: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1256,6 +1262,8 @@ class AxiomLMApp(App):
         selected_book = event.item.id if event.item and event.item.id else None
         if selected_book and selected_book != self.active_collection_name:
             self.active_collection_name = selected_book
+            self._last_chunks.clear()
+            self._last_retrieved_pages.clear()
             self._refresh_book_labels()
             self._set_header()
             self.query_one("#query_input", QueryComposer).focus()
@@ -1287,13 +1295,13 @@ class AxiomLMApp(App):
         history_str = self._format_history()
         await self._append_chat_widget(UserMessage(query))
 
+        active_book = self.active_collection_name
+        model_name = self.selected_model or OLLAMA_MODEL
         request_id = uuid4().hex
         assistant = AssistantMessage(thinking=True)
         self._pending_assistants[request_id] = assistant
+        self._request_books[request_id] = active_book
         await self._append_chat_widget(assistant, animate=False)
-
-        active_book = self.active_collection_name
-        model_name = self.selected_model or OLLAMA_MODEL
 
         worker = self.run_worker(
             lambda: self.execute_rag_query(query, history_str, active_book, model_name, request_id),
@@ -1322,6 +1330,24 @@ class AxiomLMApp(App):
         q = query.lower()
         return any(s in q for s in FOLLOWUP_SIGNALS)
 
+    def build_citation(self, book_stem: str) -> str:
+        """
+        Build citation string from last retrieved physical pages.
+        """
+        return build_page_citation(book_stem, self._last_retrieved_pages)
+
+    def extract_page_intent(self, query: str) -> list[int] | None:
+        """
+        Extract explicit page intent from query.
+
+        Accepted forms (v1):
+          - page N
+          - p.N / pN
+          - pg.N / pgN
+          - pages N-M (inclusive range)
+        """
+        return parse_page_intent(query)
+
     def execute_rag_query(self, query: str, history_str: str, book_stem: str, model_name: str, request_id: str) -> None:
         try:
             if self._is_query_cancelled(request_id):
@@ -1348,28 +1374,58 @@ class AxiomLMApp(App):
 
             # Follow-up logic: Reuse chunks if signals detected
             is_followup = self._is_followup(query)
-            if is_followup and self._last_chunks:
+            target_pages = self.extract_page_intent(query)
+            if is_followup and self._last_chunks and not target_pages:
                 context_blocks = self._last_chunks
-                metadatas = [] # Metadata info might be lost but context is preserved
+                metadatas = []  # Metadata info might be lost but context is preserved.
+                self._last_retrieved_pages = []
             else:
                 q_vec = embed_query(retrieval_query)
                 collection = get_collection(book_stem)
-                results = collection.query(
-                    query_embeddings=[q_vec],
-                    n_results=8,
-                    include=["documents", "metadatas", "distances"],
-                )
+                where_clause: dict[str, object] | None = None
+                if target_pages:
+                    if len(target_pages) == 1:
+                        where_clause = {"physical_page": target_pages[0]}
+                    else:
+                        where_clause = {"physical_page": {"$in": target_pages}}
+
+                query_kwargs: dict[str, object] = {
+                    "query_embeddings": [q_vec],
+                    "n_results": 8,
+                    "include": ["documents", "metadatas", "distances"],
+                }
+                if where_clause is not None:
+                    query_kwargs["where"] = where_clause
+                results = collection.query(**query_kwargs)
                 
                 context_blocks = []
                 metadatas = []
+                retrieved_pages: list[int] = []
                 retrieved_docs = results.get("documents") or [[]]
                 retrieved_meta = results.get("metadatas") or [[]]
                 retrieved_distances = results.get("distances") or [[]]
                 has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
+
+                # If explicit page filter finds nothing, gracefully fall back to global semantic search.
+                if target_pages and not has_retrieved_context:
+                    fallback_results = collection.query(
+                        query_embeddings=[q_vec],
+                        n_results=8,
+                        include=["documents", "metadatas", "distances"],
+                    )
+                    retrieved_docs = fallback_results.get("documents") or [[]]
+                    retrieved_meta = fallback_results.get("metadatas") or [[]]
+                    retrieved_distances = fallback_results.get("distances") or [[]]
+                    has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
+                    self.call_from_thread(
+                        self.notify,
+                        "No chunks found for requested page(s); used semantic fallback.",
+                        severity="warning",
+                    )
                 
                 if has_retrieved_context:
                     chunks = retrieved_docs[0]
-                    raw_metadatas = retrieved_meta[0] if retrieved_meta else []
+                    raw_metadatas = retrieved_meta[0] if retrieved_meta and retrieved_meta[0] else [{} for _ in chunks]
                     distances = retrieved_distances[0] if retrieved_distances else []
                     for idx, (chunk, meta) in enumerate(zip(chunks, raw_metadatas)):
                         if idx < len(distances):
@@ -1381,11 +1437,24 @@ class AxiomLMApp(App):
                         metadatas.append(meta)
                         h1 = meta.get("Header 1", "Unknown Chapter")
                         h2 = meta.get("Header 2", "Unknown Section")
-                        page_info = meta.get("page", "N/A")
+                        page_info_raw = meta.get("physical_page", meta.get("page", "N/A"))
+                        normalized_page: int | None = None
+                        try:
+                            parsed_page = int(page_info_raw)
+                            if parsed_page >= 1:
+                                normalized_page = parsed_page
+                        except (TypeError, ValueError):
+                            normalized_page = None
+                        if normalized_page is not None:
+                            retrieved_pages.append(normalized_page)
+                            page_info = normalized_page
+                        else:
+                            page_info = page_info_raw
                         context_blocks.append(f"[{h1} · {h2} · p.{page_info}]\n{chunk}")
                 
                 # Store for future follow-ups
                 self._last_chunks = context_blocks
+                self._last_retrieved_pages = retrieved_pages
 
             # DEBUG PRINTS
             print(f"\n[DEBUG RAG] history_str: {history_str[:100]}...")
@@ -1399,7 +1468,9 @@ class AxiomLMApp(App):
                 chapter=",".join(sorted({m.get("Header 1", "Unknown") for m in metadatas}))
                 if metadatas
                 else "General Knowledge",
-                pages=",".join(sorted({str(m.get("page", "?")) for m in metadatas}))
+                pages=",".join(
+                    sorted({str(m.get("physical_page", m.get("page", "?"))) for m in metadatas})
+                )
                 if metadatas
                 else "N/A",
                 history=history_str,
@@ -2393,6 +2464,8 @@ class AxiomLMApp(App):
         if self._active_query_request_id == request_id:
             self._active_query_request_id = None
             self._active_query_worker = None
+        if request_id in self._request_books:
+            self._request_books.pop(request_id, None)
 
     async def _finalize_query_cancelled(self, request_id: str) -> None:
         await self._finalize_assistant_message(request_id, "Query cancelled.", is_error=False)
@@ -2412,6 +2485,10 @@ class AxiomLMApp(App):
         telemetry_badge: str | None = None,
     ) -> None:
         if not is_error:
+            book_stem = self._request_books.get(request_id, self.active_collection_name or "")
+            citation = self.build_citation(book_stem) if book_stem else ""
+            if citation and not message.rstrip().endswith(citation):
+                message = f"{message.rstrip()}\n\n{citation}"
             self._conversation.append({"role": "user", "content": query})
             self._conversation.append({"role": "assistant", "content": message})
             

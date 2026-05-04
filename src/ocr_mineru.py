@@ -6,6 +6,7 @@ per-page checkpoints for resumable downstream indexing.
 """
 
 import gc
+import json
 import os
 import shutil
 import subprocess
@@ -320,6 +321,18 @@ def run(pdf_path: Path, force: bool = False) -> list[Path]:
         )
     full_md = "\f".join(path.read_text(encoding="utf-8") for path in checkpoint_paths)
     (out_dir / "full.md").write_text(full_md, encoding="utf-8")
+    manifest = checkpoint.page_manifest(book_stem)
+    (out_dir / "page_manifest.json").write_text(
+        json.dumps(
+            {
+                "book_stem": book_stem,
+                "total_pages": len(manifest),
+                "pages": manifest,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     return checkpoint_paths
 

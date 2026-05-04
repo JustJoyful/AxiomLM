@@ -9,6 +9,7 @@ Satisfies REQ-02.
 """
 
 import gc
+import json
 import sys
 from pathlib import Path
 
@@ -125,6 +126,18 @@ def run(pdf_path: Path, force: bool = False) -> list[Path]:
     out_dir = PARSED_MD / book_stem
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "full.md").write_text(full_md, encoding="utf-8")
+    manifest = checkpoint.page_manifest(book_stem)
+    (out_dir / "page_manifest.json").write_text(
+        json.dumps(
+            {
+                "book_stem": book_stem,
+                "total_pages": len(manifest),
+                "pages": manifest,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     return checkpoint.all_pages(book_stem)
 

@@ -15,6 +15,7 @@ ML-quality rendering; use MinerU for scanned/warped PDFs.
 Satisfies REQ-02 (clean PDF path).
 """
 
+import json
 from pathlib import Path
 
 from src import checkpoint
@@ -76,6 +77,21 @@ def run(pdf_path: Path, force: bool = False) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     full_md = "\f".join(pages)
     (out_dir / "full.md").write_text(full_md, encoding="utf-8")
+
+    # Persist page tracking manifest for downstream metadata-aware indexing.
+    # page_idx is checkpoint-native (0-based), physical_page is user-facing (1-based).
+    manifest = checkpoint.page_manifest(book_stem)
+    (out_dir / "page_manifest.json").write_text(
+        json.dumps(
+            {
+                "book_stem": book_stem,
+                "total_pages": len(manifest),
+                "pages": manifest,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     result = checkpoint.all_pages(book_stem)
     print(f"  ✓ Done: {len(result)} pages extracted")

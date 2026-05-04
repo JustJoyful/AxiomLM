@@ -13,6 +13,8 @@ from pathlib import Path
 
 from src.config import CHECKPOINTS
 
+PAGE_FILE_RE = re.compile(r"^page_(\d{4})\.md$")
+
 
 def _page_dir(book_stem: str) -> Path:
     return CHECKPOINTS / book_stem
@@ -50,13 +52,22 @@ def last_completed(book_stem: str) -> int:
     if not page_dir.exists():
         return -1
 
-    pattern = re.compile(r"^page_(\d{4})\.md$")
     indices = [
-        int(m.group(1))
+        int(match.group(1))
         for f in page_dir.iterdir()
-        if (m := pattern.match(f.name))
+        if (match := PAGE_FILE_RE.match(f.name))
     ]
     return max(indices) if indices else -1
+
+
+def page_idx_from_path(path: Path) -> int:
+    """
+    Extract zero-based page index from checkpoint filename.
+    """
+    match = PAGE_FILE_RE.match(path.name)
+    if not match:
+        raise ValueError(f"Invalid checkpoint filename format: {path.name}")
+    return int(match.group(1))
 
 
 def all_pages(book_stem: str) -> list[Path]:
@@ -68,6 +79,27 @@ def all_pages(book_stem: str) -> list[Path]:
     if not page_dir.exists():
         return []
 
-    pattern = re.compile(r"^page_\d{4}\.md$")
-    paths = sorted(f for f in page_dir.iterdir() if pattern.match(f.name))
+    paths = sorted(f for f in page_dir.iterdir() if PAGE_FILE_RE.match(f.name))
     return paths
+
+
+def page_manifest(book_stem: str) -> list[dict[str, int | str]]:
+    """
+    Build ordered page manifest from existing checkpoints.
+
+    Returns rows:
+      - page_idx: zero-based checkpoint index
+      - physical_page: one-based page number for user-facing metadata
+      - checkpoint_file: filename (e.g., page_0007.md)
+    """
+    manifest: list[dict[str, int | str]] = []
+    for path in all_pages(book_stem):
+        page_idx = page_idx_from_path(path)
+        manifest.append(
+            {
+                "page_idx": page_idx,
+                "physical_page": page_idx + 1,
+                "checkpoint_file": path.name,
+            }
+        )
+    return manifest
