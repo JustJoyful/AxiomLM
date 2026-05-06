@@ -1051,6 +1051,7 @@ class AxiomLMApp(App):
         self._cancelled_query_ids: set[str] = set()
         self._query_input_min_height = 3
         self._query_input_max_height = 8
+        self._use_gpu_for_embeddings = False
 
         # Conversation memory
         self._conversation: list[dict[str, str]] = []
@@ -1871,9 +1872,12 @@ class AxiomLMApp(App):
                         "Install with: uv pip install mineru"
                     )
 
-            gpu_note = self._gpu_runtime_note()
+            use_gpu_for_embeddings = self._use_gpu_for_embeddings
+            if resolved_mode == "mineru":
+                use_gpu_for_embeddings = True
+            gpu_note = self._gpu_runtime_note(use_gpu_for_embeddings)
             total_pages = self._pdf_page_count(pdf)
-            parse_env = self._build_parse_env()
+            parse_env = self._build_parse_env(use_gpu_for_embeddings)
             engine_label = {
                 "pymupdf4llm": "pymupdf4llm",
                 "marker": "Marker (8GB VRAM)",
@@ -2168,11 +2172,11 @@ class AxiomLMApp(App):
         log_path.write_text("\n".join(content), encoding="utf-8")
 
     @staticmethod
-    def _build_parse_env() -> dict[str, str]:
+    def _build_parse_env(use_gpu_for_embeddings: bool) -> dict[str, str]:
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        if AxiomLMApp._torch_cuda_available():
+        if use_gpu_for_embeddings and AxiomLMApp._torch_cuda_available():
             env["AXIOM_EMBED_DEVICE"] = "cuda"
             env.setdefault("CUDA_VISIBLE_DEVICES", "0")
         else:
@@ -2214,12 +2218,14 @@ class AxiomLMApp(App):
             return False
 
     @staticmethod
-    def _gpu_runtime_note() -> str:
+    def _gpu_runtime_note(use_gpu_for_embeddings: bool) -> str:
+        if not use_gpu_for_embeddings:
+            return "GPU embeddings disabled (toggle with /gpu-parsing)"
         if AxiomLMApp._torch_cuda_available():
-            return "GPU acceleration active"
+            return "GPU embeddings enabled (CUDA)"
         if AxiomLMApp._nvidia_gpu_present():
-            return "NVIDIA GPU detected but Torch is CPU-only (install CUDA torch wheel)"
-        return "No CUDA GPU runtime detected"
+            return "GPU requested but Torch is CPU-only (install CUDA torch wheel)"
+        return "GPU requested but no CUDA GPU runtime detected"
 
     @staticmethod
     def _extract_indexed_chunk_count(output: str) -> int:
@@ -2332,13 +2338,39 @@ class AxiomLMApp(App):
             return
         self._prompt_delete_collection(self.active_collection_name)
 
+    async def _send_gpu_status(self, *, include_future_note: bool = False) -> None:
+        status = "enabled" if self._use_gpu_for_embeddings else "disabled"
+        if include_future_note:
+            self.notify(f"GPU embeddings {status}.", severity="information")
+            await self._append_chat_widget(
+                AssistantMessage(f"GPU embeddings {status} for future parse/index runs.")
+            )
+            return
+
+        self.notify(f"GPU embeddings are currently {status}.", severity="information")
+        await self._append_chat_widget(
+            AssistantMessage(f"GPU embeddings are currently {status}.")
+        )
+
     async def _handle_chat_command(self, command_text: str) -> None:
         command, _, arg = command_text.partition(" ")
         command = command.strip().lower()
         argument = arg.strip()
 
+        if command == "/gpu-parsing":
+            self._use_gpu_for_embeddings = not self._use_gpu_for_embeddings
+            await self._send_gpu_status(include_future_note=True)
+            return
+
+        if command == "/gpu-status":
+            await self._send_gpu_status()
+            return
+
         if command != "/delete":
-            self.notify("Unknown command. Supported: /delete [book]", severity="warning")
+            self.notify(
+                "Unknown command. Supported: /delete [book], /gpu-parsing, /gpu-status",
+                severity="warning",
+            )
             return
 
         target = argument or self.active_collection_name or ""

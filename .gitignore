@@ -35,7 +35,7 @@ ENV/
 *.swp
 *.swo
 
-# AI coding tool traces
+# AI coding tool traces bs i keep trying diffrent tools
 .agent/
 .agents/
 .gemini/
@@ -54,18 +54,20 @@ desktop.ini
 *.log
 logs/
 
-# Auto-generated / Boilerplate
+# Auto-generated / Boilerplate mid ass
 GSD-STYLE.md
 PROJECT_RULES.md
 model_capabilities.yaml
 adapters/
 gsd-template/
 
-# Project Planning & CI/Copilot Logs
+# Project Planning & CI/Copilot Logs bs
 PLAN.md
 ARCHITECTURE.md
 STACK.md
 IMPLEMENTATION_PLAN.md
+CLAUDE.md
+ #trying claude code for the first time with deepseek
 *copilot*
 # Temporary test directories
 tmp_test/
