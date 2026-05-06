@@ -275,18 +275,13 @@ def _enforce_chunk_quality(quality: dict[str, int]) -> None:
         failures.append(f"unbalanced block math={quality['block_math_unbalanced']}")
     if quality["empty_chunks"] > 0:
         failures.append(f"empty chunks={quality['empty_chunks']}")
+    if quality["oversized_pct"] > 5:
+        failures.append(f"oversized_pct={quality['oversized_pct']}%")
+    if quality["tiny_pct"] > 5:
+        failures.append(f"tiny_pct={quality['tiny_pct']}%")
 
     if failures:
         raise ValueError("Chunk quality check failed: " + "; ".join(failures))
-
-    warnings: list[str] = []
-    if quality["oversized_pct"] > 20:
-        warnings.append(f"oversized_pct={quality['oversized_pct']}%")
-    if quality["tiny_pct"] > 50:
-        warnings.append(f"tiny_pct={quality['tiny_pct']}%")
-        
-    if warnings:
-        print(f"    -> Warning: Chunk size distribution flagged: {', '.join(warnings)}")
 
 
 def _load_physical_page_map(book_stem: str) -> dict[int, int]:
