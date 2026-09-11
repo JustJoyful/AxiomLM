@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.page_querying import build_citation, extract_page_intent
+from src.page_querying import build_citation, extract_page_intent  # noqa: E402
 
 OPTIONAL_TUI_VALIDATION_DEPS = {"httpx", "textual", "rich"}
 

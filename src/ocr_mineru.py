@@ -6,7 +6,6 @@ per-page checkpoints for resumable downstream indexing.
 """
 
 import gc
-import json
 import os
 import shutil
 import subprocess
@@ -266,7 +265,6 @@ def run(pdf_path: Path, force: bool = False) -> list[Path]:
                         sorted_pages = sorted(page_markers.keys())
                         current_md = batch_md
                         for i in range(len(sorted_pages)):
-                            curr_page = sorted_pages[i]
                             if i + 1 < len(sorted_pages):
                                 next_marker = page_markers[sorted_pages[i+1]]
                                 # Try to find where the next page starts

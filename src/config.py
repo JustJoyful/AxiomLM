@@ -17,7 +17,7 @@ LOGS_DIR     = DATA / "logs"
 
 # ── Ollama / LLM ──────────────────────────────────────────────────────────────
 OLLAMA_URL   = "http://localhost:11434"
-OLLAMA_MODEL = "gemma:latest"
+OLLAMA_MODEL = "qwen3:4b"
 
 # ── Ollama sampling / response style ──────────────────────────────────────────
 # Lower temperature favors structured, deterministic study answers.

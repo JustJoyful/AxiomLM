@@ -500,7 +500,7 @@ def _build_parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     args = _build_parser().parse_args()
     print("=========================================")
-    print(f" AxiomLM Semantic Indexer")
+    print(" AxiomLM Semantic Indexer")
     print("=========================================")
     chunks = index_book(args.book_stem, reindex=args.reindex)
     print("=========================================")

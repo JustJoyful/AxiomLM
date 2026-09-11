@@ -10,7 +10,6 @@ Satisfies REQ-02.
 
 import gc
 import json
-import sys
 from pathlib import Path
 
 from src import checkpoint

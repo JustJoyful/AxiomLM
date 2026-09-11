@@ -2,7 +2,7 @@
 tui.py — AxiomLM Terminal UI for querying documents.
 
 Provides a Textual application with a sidebar to switch between indexed textbooks,
-and a chat panel to interact with Gemma via Ollama using RAG.
+and a chat panel to interact with Qwen via Ollama using RAG.
 """
 
 import importlib.util
@@ -39,7 +39,6 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
-    Markdown,
     ProgressBar,
     Select,
     Static,
@@ -710,7 +709,7 @@ class TuningPanel(Static):
 
 
 class AxiomLMApp(App):
-    """AxiomLM terminal UI with sidebar, chat widgets, and Gemma integration."""
+    """AxiomLM terminal UI with sidebar, chat widgets, and Qwen integration."""
     top_k_results = reactive(TOP_K_RESULTS)
     distance_threshold = reactive(DISTANCE_THRESHOLD)
 

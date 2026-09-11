@@ -1,39 +1,57 @@
-# AGENTS.md — AxiomLM Codebase Conventions
+# AGENTS.md — AxiomLM Developer & Agent Guide
 
-> **Goal:** A compact instruction file for autonomous agents to maintain context and follow idiosyncratic workflow patterns.
-> **Directive:** Every line must answer: "Would an agent likely miss this without help?"
+> **Purpose:** Essential conventions, architectural invariants, and operational commands for coding agents working on AxiomLM.
 
-## 🚀 Core Development Workflow (GSD Protocol)
-*   **Prerequisite:** No development or implementation (`feat`, `fix`) may begin until `PROJECT_RULES.md` is updated and `AGENTS.md` specifies `Status: FINALIZED` in `.gsd/SPEC.md`.
-*   **Commit Granularity:** One single task = one commit. Never commit a wave of unrelated changes.
-*   **Commit Format:** Must adhere to `type(scope): description` (e.g., `feat(tui): Added source cuing`).
-    *   **Types:** `feat`, `fix`, `docs`, `refactor`, `test`, `chore`.
+---
 
-## 🧐 Model & Context Management Quirks
-*   **Context Decay:** The context window is highly volatile. State persistence *requires* updating `.gsd/STATE.md` after every major task or wave.
-*   **Research First:** Before reading any file, use `grep` or `Select-String` to find specific lines or patterns. Reading entire files is context pollution.
-*   **Source of Truth (Configuration):** All runtime paths, models, and tunables are hardcoded in `src/config.py`. Do not assume new paths or configurations are available elsewhere.
-*   **Embedding Schema:** All embeddings must use specific prefixes:
-    *   **Document Chunks:** Use the prefix `Document: `
-    *   **Queries:** Use the prefix `Query: `
+## 1. Core Architecture & Invariants
 
-## ⚙️ Technical Architecture Boundaries
-*   **Canonical Directory:** `src/config.py` is the single source of truth for the entire application.
-*   **OCR Router:** The entry point for fetching PDF content is always `src/ocr.py`. This file selects the engine (`auto`, `marker`, or `mineru`).
-*   **Data Flow (Mandatory Order):** `PDF` $\to$ `src/ocr.py` $\to$ `data/parsed_md/*.md` $\to$ `src/indexer.py` $\to$ `data/vector_store` $\to$ `src/tui.py`.
-*   **Extraction Logic:** OCR processes must save page-level markdown checkpoints using the fixed format: `page_NNNN.md` (Zero-padded).
+* **Single Source of Truth:** `src/config.py` contains all paths, model identifiers, and tunable thresholds. Never hardcode model names, paths, or thresholds in other modules.
+* **Default LLM:** `qwen3:4b` served locally via Ollama (`http://localhost:11434`).
+* **Embedding Model:** `jinaai/jina-embeddings-v5-text-nano` running on CPU (or GPU when opted-in).
+* **Asymmetric Embedding Schema (Mandatory):**
+  * Stored document chunks MUST be prefixed with: `Document: `
+  * Search/query strings MUST be prefixed with: `Query: `
+* **Data Flow Pipeline:**
+  $$\text{PDF} \xrightarrow{\text{src/ocr.py}} \text{data/parsed\_md/checkpoints/page\_NNNN.md} \to \text{full.md} \xrightarrow{\text{src/indexer.py}} \text{data/vector\_store} \xrightarrow{\text{src/tui.py}} \text{Ollama}$$
+* **Page Checkpoints:** Must adhere strictly to `page_NNNN.md` (4-digit zero-padded integer).
+* **VRAM Guardrail:** On consumer 6GB VRAM GPUs (e.g. RTX 3050), heavy OCR (`MinerU`) and LLM generation (`qwen3:4b`) must never execute concurrently.
 
-## 🔨 Mandatory Development Commands & Checks
-*   **Verification Chain:** For production readiness, the sequence is non-negotiable: `npm run lint` $\to$ `npm run typecheck` $\to$ `npm test` (or equivalent platform commands).
-*   **Code Search (ripgrep):** Use `rg "pattern" --type "*.ts"` for robust code artifact searching.
-*   **Testing Quirks:** No dedicated unit test suite exists (`tests/` is absent). Verification relies on `src/validate-*.sh|ps1` scripts.
-*   **Debugging/Recovery:**
-    *   **Pattern:** If debugging fails 3 times, STOP. Update `STATE.md` with the attempt log and use a fresh session.
-    *   **State Recovery:** Always check `.gsd/STATE.md` for the next action before continuing any run.
+---
 
-## ♻️ State Management & Cleanup
-*   **Wave Protocol:** Grouping work into labeled "Waves" is required for atomic committing. Must update `ROADMAP.md` and commit proof.
-*   **Context Compression:** When moving between waves, summarize/reference previous work in `STATE.md` rather than reloading vast chunks of code/logs.
-*   **Environment:** Assume `OLLAMA_HOST=http://localhost:11434` is the inference endpoint.
+## 2. OCR Engine Selection Rules
 
-***Source Documentation:** This file synthesizes operational details from `PROJECT_RULES.md`, `ARCHITECTURE.md`, `GSD-STYLE.md`, and `docs/runbook.md` to enforce adherence to unique and critical workflow patterns.*
+* **Entry Point:** Always `src/ocr.py`.
+* **Engines:**
+  * `pymupdf4llm` — Default for clean digital PDFs (CPU only, $<10$s for 200+ pages).
+  * `mineru` — For complex or photographed scanned PDFs (GPU batching of 24 pages with VRAM clearing).
+  * `marker` — Optional manual math parser for clean PDFs when $\ge 8$GB VRAM is available.
+* **Auto-Routing Heuristic:** Samples 8 evenly spaced pages. Only routes to MinerU if $\ge 50\%$ of sampled pages exhibit scan-like metrics ($T \le 180$ chars and $C \ge 0.45$ image coverage).
+
+---
+
+## 3. Development Commands & Verification
+
+* **Environment Setup:**
+  ```bash
+  bash scripts/setup_env.sh
+  source .venv/bin/activate
+  ```
+* **Linting & Code Style:**
+  ```bash
+  .venv/bin/ruff check src/ scripts/
+  .venv/bin/black --check src/
+  ```
+* **Database & Metadata Validation:**
+  ```bash
+  python scripts/validate_page_metadata.py <book_stem>
+  python scripts/validate_page_querying.py <book_stem> "sample question"
+  ```
+* **Run Application:**
+  ```bash
+  python -m src.tui
+  # or
+  axiomlm
+  ```
+* **Commit Conventions:**
+  `type(scope): description` (e.g., `feat(ocr): add heuristic preview`, `fix(tui): handle empty collection error`).

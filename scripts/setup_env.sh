@@ -21,7 +21,7 @@ uv pip install -r requirements.txt
 # 3. Optional: install MinerU (uncomment if you want to test warped scans later)
 # uv pip install mineru
 
-echo "[4/4] Pulling Gemma via Ollama ..."
-ollama pull gemma
+echo "[4/4] Pulling qwen3:4b via Ollama ..."
+ollama pull qwen3:4b
 
 echo "Setup complete! Activate with: source $VENV_DIR/bin/activate"

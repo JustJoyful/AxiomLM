@@ -1,12 +1,12 @@
 # Data — never commit PDFs, images, markdown, or the vector store
 data/
 *.pdf
-
 *.jpg
 *.jpeg
 !AxiomLM.png
+!image*.png
 
-# Python bytecode
+# Python bytecode & build
 __pycache__/
 *.py[cod]
 *.pyo
@@ -15,6 +15,7 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+.ruff_cache/
 
 # Virtual environments
 .venv/
@@ -29,45 +30,26 @@ ENV/
 *.pt
 *.pth
 
-# IDE configuration
+# IDE & Editor configuration
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# AI coding tool traces bs i keep trying diffrent tools
-.agent/
-.agents/
-.gemini/
-.gsd/
-.copilot-instructions*
-*.cursor
-.aider*
-.continue/
-
-# OS
+# OS files
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Logs
+# Logs & Temporary files
 *.log
 logs/
-
-# Auto-generated / Boilerplate mid ass
-GSD-STYLE.md
-PROJECT_RULES.md
-model_capabilities.yaml
-adapters/
-gsd-template/
-
-# Project Planning & CI/Copilot Logs bs
-PLAN.md
-ARCHITECTURE.md
-STACK.md
-IMPLEMENTATION_PLAN.md
-CLAUDE.md
- #trying claude code for the first time with deepseek
-*copilot*
-# Temporary test directories
 tmp_test/
+
+# Local agent & planning files (not tracked on GitHub)
+AGENTS.md
+CLAUDE.md
+PRD.md
+memory.md
+architecture.md
+
