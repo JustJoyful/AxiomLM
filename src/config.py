@@ -17,7 +17,7 @@ LOGS_DIR     = DATA / "logs"
 
 # ── Ollama / LLM ──────────────────────────────────────────────────────────────
 OLLAMA_URL   = "http://localhost:11434"
-OLLAMA_MODEL = "qwen3:4b"
+OLLAMA_MODEL = "qwen3.5:4b-q4_K_M"
 
 # ── Ollama sampling / response style ──────────────────────────────────────────
 # Lower temperature favors structured, deterministic study answers.
@@ -29,16 +29,27 @@ OLLAMA_MIROSTAT_TAU = 5.0
 OLLAMA_MIROSTAT_ETA = 0.1
 
 # ── Embeddings ────────────────────────────────────────────────────────────────
-# jina-v5-text-nano: 239M params, 32K token context, CPU-only, MTEB 71.0
-# IMPORTANT: Always use "Query: " / "Document: " prefixes for asymmetric retrieval
-EMBED_MODEL   = "jinaai/jina-embeddings-v5-text-nano"
-# Device selection for sentence-transformers embeddings:
-#   "auto" => cuda if available, otherwise cpu
-#   "cuda" / "cpu" => force device
-# Force CPU for embeddings to save precious VRAM for MinerU and Ollama.
-# Jina-v5-nano is fast enough on CPU.
-EMBED_DEVICE  = "cpu"
+# Prefixes and retrieval adapter must be identical across ingest/query.
+EMBED_MODEL = "jinaai/jina-embeddings-v5-text-nano"
+EMBED_REVISION = "8a7f00aac812071b69403df470f1038ec85f8925"
+INGEST_EMBED_DEVICE = "cuda"
+QUERY_EMBED_DEVICE = "cpu"
+EMBED_DEVICE = QUERY_EMBED_DEVICE  # Legacy callers remain CPU-safe.
+EMBED_BATCH_SIZE = 8
 
+# Foundation budgets; measured by validate_foundation before phase acceptance.
+OLLAMA_CONTEXT_TOKENS = 4096
+OLLAMA_OUTPUT_TOKENS = 512
+OLLAMA_REQUEST_TIMEOUT_SECONDS = 120.0
+OLLAMA_READ_TIMEOUT_SECONDS = 5.0
+OLLAMA_UNLOAD_TIMEOUT_SECONDS = 20.0
+OLLAMA_POLL_INTERVAL_SECONDS = 0.2
+OLLAMA_KEEP_ALIVE = 0
+RUNTIME_MANIFEST_PATH = LOGS_DIR / "runtime_manifest.json"
+FOUNDATION_REPORT_PATH = LOGS_DIR / "foundation_report.json"
+TOOLS_REPORT_PATH = LOGS_DIR / "ollama_tools.json"
+FOUNDATION_VECTOR_STORE = DATA / "foundation_vector_store"
+INGEST_MIN_FREE_VRAM_MB = 2048
 # ── Chunking & retrieval ──────────────────────────────────────────────────────
 CHUNK_SIZE    = 800    # target tokens per chunk
 CHUNK_OVERLAP = 100    # overlap tokens between adjacent chunks
