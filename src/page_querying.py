@@ -68,3 +68,12 @@ def build_citation(book_stem: str, retrieved_pages: list[int]) -> str:
     if len(pages) == 1:
         return f"[{book_stem} · p.{pages[0]}]"
     return f"[{book_stem} · p.{collapse_page_ranges(pages)}]"
+
+
+def strip_model_footnotes(text: str) -> str:
+    """Remove model-authored Markdown footnotes; the app owns source citations."""
+    text = re.sub(r"(?m)^\[\^\d+\]:[^\n]*\n?", "", text)
+    text = re.sub(r"[ \t]*\[\^\d+\]", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    abstention = "The indexed material does not provide enough evidence to answer this question."
+    return abstention if text.startswith(abstention) else text

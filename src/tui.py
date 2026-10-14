@@ -6,7 +6,6 @@ and a chat panel to interact with Qwen via Ollama using RAG.
 """
 
 import importlib.util
-import json
 import os
 import re
 import signal
@@ -16,7 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Thread
+from threading import Lock, Thread
 from typing import Callable
 from uuid import uuid4
 
@@ -51,22 +50,26 @@ from .config import (
     LOGS_DIR,
     MARKER_OCR_TIMEOUT_SECONDS,
     MINERU_OCR_TIMEOUT_SECONDS,
-    OLLAMA_MIROSTAT,
-    OLLAMA_MIROSTAT_ETA,
-    OLLAMA_MIROSTAT_TAU,
     OLLAMA_MODEL,
-    OLLAMA_TEMPERATURE,
-    OLLAMA_TOP_P,
     OLLAMA_URL,
     PROCESS_TERMINATE_GRACE_SECONDS,
     PYMUPDF4LLM_OCR_TIMEOUT_SECONDS,
     TOP_K_RESULTS,
 )
 from .clipboard import copy_to_clipboard, extract_code_blocks
-from .db import delete_collection, embed_query, get_collection, list_collections
+from .db import (
+    delete_collection,
+    embed_query,
+    ensure_collection_ready,
+    get_collection,
+    list_collections,
+)
+from .llm import OllamaClient
+from .workloads import WorkloadCoordinator, WorkloadKind
 from .page_querying import (
     build_citation as build_page_citation,
     extract_page_intent as parse_page_intent,
+    strip_model_footnotes,
 )
 
 
@@ -173,7 +176,7 @@ def latex_to_unicode(text: str) -> str:
 
 PROMPT_TEMPLATE = """You are Axie, a study assistant built into a terminal UI. Responses render in a Rich-enabled terminal supporting markdown tables and markup.
 
-Important: You have access to conversation history below. Use it to understand references like "this topic", "that exercise", or "the previous example". If a follow-up question is asked and the history makes the intent clear, use the retrieved context to answer even if it seems tangential.
+Important: You have access to conversation history below. Use it only to understand references like "this topic", "that exercise", or "the previous example". Use retrieved context to support factual claims.
 
 Formatting rules:
 - Use **bold** for key terms and important values
@@ -195,10 +198,7 @@ Retrieved context from {book}:
 
 Current question: {question}
 
-Answer in study notes style. Never refuse due to missing context — always provide the best answer you can with available information.
-
-Citation (last line only):
-[{book} · {chapter} · p.{pages}]"""
+Evidence rules override formatting and verbosity: Every factual sentence must be supported by a retrieved excerpt. Conversation history is never evidence; use it only to resolve references. If retrieved context does not support the answer, say only: 'The indexed material does not provide enough evidence to answer this question.' If it supports only part of the answer, state only those supported facts and identify the gap. Never infer book content from its title, previous answers, or general knowledge. Do not invent or alter examples or code; reuse only examples present in retrieved context. Do not write citations; the application adds citations from retrieved page metadata."""
 
 
 class QueryComposer(TextArea):
@@ -1050,11 +1050,16 @@ class AxiomLMApp(App):
         self._cancelled_query_ids: set[str] = set()
         self._query_input_min_height = 3
         self._query_input_max_height = 8
-        self._use_gpu_for_embeddings = False
+        self._use_gpu_for_embeddings = True
+        self._workload_coordinator = WorkloadCoordinator()
+        self._query_workload_token: str | None = None
+        self._parse_workload_token: str | None = None
+        self._active_processes: set[subprocess.Popen[str]] = set()
+        self._process_lock = Lock()
+        self._process_shutdown_started = False
 
         # Conversation memory
         self._conversation: list[dict[str, str]] = []
-        self._last_chunks: list[str] = []
         self._last_retrieved_pages: list[int] = []
         self._request_books: dict[str, str] = {}
 
@@ -1119,6 +1124,12 @@ class AxiomLMApp(App):
         self._render_mascot()
         self._refresh_models()
         self._sync_tuning_panel()
+
+    def on_unmount(self) -> None:
+        request_id = self._active_query_request_id
+        if request_id:
+            self._cancelled_query_ids.add(request_id)
+        self._terminate_active_processes()
 
     def watch_top_k_results(self, value: int) -> None:
         self._sync_tuning_panel()
@@ -1262,7 +1273,6 @@ class AxiomLMApp(App):
         selected_book = event.item.id if event.item and event.item.id else None
         if selected_book and selected_book != self.active_collection_name:
             self.active_collection_name = selected_book
-            self._last_chunks.clear()
             self._last_retrieved_pages.clear()
             self._refresh_book_labels()
             self._set_header()
@@ -1297,20 +1307,77 @@ class AxiomLMApp(App):
 
         active_book = self.active_collection_name
         model_name = self.selected_model or OLLAMA_MODEL
+        workload_token = self._try_acquire_workload("generation")
+        if workload_token is None:
+            message = "GPU work is busy with ingestion or generation. Try again when it finishes."
+            self.notify(message, severity="warning")
+            await self._append_chat_widget(AssistantMessage(message, is_error=True))
+            return
         request_id = uuid4().hex
+        self._query_workload_token = workload_token
         assistant = AssistantMessage(thinking=True)
         self._pending_assistants[request_id] = assistant
         self._request_books[request_id] = active_book
-        await self._append_chat_widget(assistant, animate=False)
-
-        worker = self.run_worker(
-            lambda: self.execute_rag_query(query, history_str, active_book, model_name, request_id),
-            thread=True,
-            group="queries",
-            exit_on_error=False,
-        )
+        try:
+            await self._append_chat_widget(assistant, animate=False)
+            worker = self.run_worker(
+                lambda: self._execute_rag_query_with_admission(
+                    query, history_str, active_book, model_name, request_id, workload_token
+                ),
+                thread=True,
+                group="queries",
+                exit_on_error=False,
+            )
+        except Exception:
+            self._release_workload(workload_token)
+            self._query_workload_token = None
+            self._pending_assistants.pop(request_id, None)
+            self._request_books.pop(request_id, None)
+            raise
         self._active_query_worker = worker
         self._active_query_request_id = request_id
+
+    def _try_acquire_workload(self, kind: WorkloadKind) -> str | None:
+        return self._workload_coordinator.try_acquire(kind)
+
+    def _release_workload(self, token: str) -> None:
+        self._workload_coordinator.release(token)
+
+    def _execute_rag_query_with_admission(
+        self,
+        query: str,
+        history_str: str,
+        book_stem: str,
+        model_name: str,
+        request_id: str,
+        workload_token: str,
+    ) -> None:
+        try:
+            self.execute_rag_query(query, history_str, book_stem, model_name, request_id)
+        finally:
+            try:
+                # Closing a client stream requests server-side cancellation, but
+                # admission stays owned until Ollama confirms model cleanup.
+                OllamaClient().unload_and_wait()
+            except Exception as exc:
+                try:
+                    self.call_from_thread(
+                        self._report_generation_cleanup_failure,
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                except Exception:
+                    pass
+            else:
+                self._release_workload(workload_token)
+                if self._query_workload_token == workload_token:
+                    self._query_workload_token = None
+
+    def _report_generation_cleanup_failure(self, detail: str) -> None:
+        self.notify(
+            f"Could not confirm local model cleanup; GPU work remains blocked. {detail}",
+            severity="error",
+            timeout=10,
+        )
 
     def _format_history(self) -> str:
         if not self._conversation:
@@ -1372,89 +1439,83 @@ class AxiomLMApp(App):
                             retrieval_query = f"{prev_context} {query}"
                         break
 
-            # Follow-up logic: Reuse chunks if signals detected
+            # Always retrieve the rewritten query so follow-ups get fresh evidence.
             is_followup = self._is_followup(query)
             target_pages = self.extract_page_intent(query)
-            if is_followup and self._last_chunks and not target_pages:
-                context_blocks = self._last_chunks
-                metadatas = []  # Metadata info might be lost but context is preserved.
-                self._last_retrieved_pages = []
-            else:
-                q_vec = embed_query(retrieval_query)
-                collection = get_collection(book_stem)
-                where_clause: dict[str, object] | None = None
-                if target_pages:
-                    if len(target_pages) == 1:
-                        where_clause = {"physical_page": target_pages[0]}
-                    else:
-                        where_clause = {"physical_page": {"$in": target_pages}}
+            q_vec = embed_query(retrieval_query)
+            collection = get_collection(book_stem)
+            ensure_collection_ready(collection)
+            where_clause: dict[str, object] | None = None
+            if target_pages:
+                if len(target_pages) == 1:
+                    where_clause = {"physical_page": target_pages[0]}
+                else:
+                    where_clause = {"physical_page": {"$in": target_pages}}
 
-                query_kwargs: dict[str, object] = {
-                    "query_embeddings": [q_vec],
-                    "n_results": 8,
-                    "include": ["documents", "metadatas", "distances"],
-                }
-                if where_clause is not None:
-                    query_kwargs["where"] = where_clause
-                results = collection.query(**query_kwargs)
+            query_kwargs: dict[str, object] = {
+                "query_embeddings": [q_vec],
+                "n_results": 8,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if where_clause is not None:
+                query_kwargs["where"] = where_clause
+            results = collection.query(**query_kwargs)
                 
-                context_blocks = []
-                metadatas = []
-                retrieved_pages: list[int] = []
-                retrieved_docs = results.get("documents") or [[]]
-                retrieved_meta = results.get("metadatas") or [[]]
-                retrieved_distances = results.get("distances") or [[]]
+            context_blocks = []
+            metadatas = []
+            retrieved_pages: list[int] = []
+            retrieved_docs = results.get("documents") or [[]]
+            retrieved_meta = results.get("metadatas") or [[]]
+            retrieved_distances = results.get("distances") or [[]]
+            has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
+
+            # If explicit page filter finds nothing, gracefully fall back to global semantic search.
+            if target_pages and not has_retrieved_context:
+                fallback_results = collection.query(
+                    query_embeddings=[q_vec],
+                    n_results=8,
+                    include=["documents", "metadatas", "distances"],
+                )
+                retrieved_docs = fallback_results.get("documents") or [[]]
+                retrieved_meta = fallback_results.get("metadatas") or [[]]
+                retrieved_distances = fallback_results.get("distances") or [[]]
                 has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
-
-                # If explicit page filter finds nothing, gracefully fall back to global semantic search.
-                if target_pages and not has_retrieved_context:
-                    fallback_results = collection.query(
-                        query_embeddings=[q_vec],
-                        n_results=8,
-                        include=["documents", "metadatas", "distances"],
-                    )
-                    retrieved_docs = fallback_results.get("documents") or [[]]
-                    retrieved_meta = fallback_results.get("metadatas") or [[]]
-                    retrieved_distances = fallback_results.get("distances") or [[]]
-                    has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
-                    self.call_from_thread(
-                        self.notify,
-                        "No chunks found for requested page(s); used semantic fallback.",
-                        severity="warning",
-                    )
+                self.call_from_thread(
+                    self.notify,
+                    "No chunks found for requested page(s); used semantic fallback.",
+                    severity="warning",
+                )
                 
-                if has_retrieved_context:
-                    chunks = retrieved_docs[0]
-                    raw_metadatas = retrieved_meta[0] if retrieved_meta and retrieved_meta[0] else [{} for _ in chunks]
-                    distances = retrieved_distances[0] if retrieved_distances else []
-                    for idx, (chunk, meta) in enumerate(zip(chunks, raw_metadatas)):
-                        if idx < len(distances):
-                            distance = distances[idx]
-                            # Be more lenient for vague queries
-                            limit = self.distance_threshold * 1.4 if is_vague else self.distance_threshold
-                            if isinstance(distance, (int, float)) and distance >= limit:
-                                continue
-                        metadatas.append(meta)
-                        h1 = meta.get("Header 1", "Unknown Chapter")
-                        h2 = meta.get("Header 2", "Unknown Section")
-                        page_info_raw = meta.get("physical_page", meta.get("page", "N/A"))
-                        normalized_page: int | None = None
-                        try:
-                            parsed_page = int(page_info_raw)
-                            if parsed_page >= 1:
-                                normalized_page = parsed_page
-                        except (TypeError, ValueError):
-                            normalized_page = None
-                        if normalized_page is not None:
-                            retrieved_pages.append(normalized_page)
-                            page_info = normalized_page
-                        else:
-                            page_info = page_info_raw
-                        context_blocks.append(f"[{h1} · {h2} · p.{page_info}]\n{chunk}")
+            if has_retrieved_context:
+                chunks = retrieved_docs[0]
+                raw_metadatas = retrieved_meta[0] if retrieved_meta and retrieved_meta[0] else [{} for _ in chunks]
+                distances = retrieved_distances[0] if retrieved_distances else []
+                for idx, (chunk, meta) in enumerate(zip(chunks, raw_metadatas)):
+                    if idx < len(distances):
+                        distance = distances[idx]
+                        # Be more lenient for vague queries
+                        limit = self.distance_threshold * 1.4 if is_vague else self.distance_threshold
+                        if isinstance(distance, (int, float)) and distance >= limit:
+                            continue
+                    metadatas.append(meta)
+                    h1 = meta.get("Header 1", "Unknown Chapter")
+                    h2 = meta.get("Header 2", "Unknown Section")
+                    page_info_raw = meta.get("physical_page", meta.get("page", "N/A"))
+                    normalized_page: int | None = None
+                    try:
+                        parsed_page = int(page_info_raw)
+                        if parsed_page >= 1:
+                            normalized_page = parsed_page
+                    except (TypeError, ValueError):
+                        normalized_page = None
+                    if normalized_page is not None:
+                        retrieved_pages.append(normalized_page)
+                        page_info = normalized_page
+                    else:
+                        page_info = page_info_raw
+                    context_blocks.append(f"[{h1} · {h2} · p.{page_info}]\n{chunk}")
                 
-                # Store for future follow-ups
-                self._last_chunks = context_blocks
-                self._last_retrieved_pages = retrieved_pages
+            self._last_retrieved_pages = retrieved_pages
 
             # DEBUG PRINTS
             print(f"\n[DEBUG RAG] history_str: {history_str[:100]}...")
@@ -1476,7 +1537,7 @@ class AxiomLMApp(App):
                 history=history_str,
                 context="\n\n".join(context_blocks)
                 if context_blocks
-                else "No direct context retrieved from indexed files. Use your general knowledge.",
+                else "No direct context retrieved from indexed files.",
                 question=query,
             )
 
@@ -1485,25 +1546,23 @@ class AxiomLMApp(App):
             was_cancelled = False
             stream_started = time.monotonic()
             stream_metrics: dict[str, object] = {}
-            with Client(timeout=240.0) as client:
-                with client.stream(
-                    "POST",
-                    f"{OLLAMA_URL}/api/generate",
-                    json=self._build_generate_payload(model_name, prompt, stream=True),
-                ) as response:
-                    response.raise_for_status()
-                    for line in response.iter_lines():
-                        if self._is_query_cancelled(request_id):
-                            was_cancelled = True
-                            break
-                        if not line:
-                            continue
-                        data = json.loads(line)
-                        if data.get("done"):
-                            stream_metrics = data
-                        token = data.get("response", "")
-                        if token:
-                            accumulated_response += token
+            stream = OllamaClient().generate(
+                prompt, model=model_name, stream=True, think=False
+            )
+            if isinstance(stream, dict):
+                raise RuntimeError("Ollama returned a non-stream payload for a stream request.")
+            try:
+                for data in stream:
+                    if self._is_query_cancelled(request_id):
+                        was_cancelled = True
+                        break
+                    if data.get("done"):
+                        stream_metrics = data
+                    token = data.get("response", "")
+                    if token:
+                        accumulated_response += token
+            finally:
+                stream.close()
 
             if was_cancelled:
                 self.call_from_thread(self._finalize_query_cancelled, request_id)
@@ -1515,7 +1574,9 @@ class AxiomLMApp(App):
             )
 
             # Post-process for math rendering
-            accumulated_response = latex_to_unicode(accumulated_response)
+            accumulated_response = strip_model_footnotes(
+                latex_to_unicode(accumulated_response)
+            )
 
             # Stream only the final response to avoid flashing an initial refusal.
             # Stream by completed lines so markdown tables/lists do not flicker mid-row.
@@ -1584,25 +1645,6 @@ class AxiomLMApp(App):
             return lines
         return [response]
 
-    def _build_ollama_options(self) -> dict[str, object]:
-        options: dict[str, object] = {
-            "temperature": OLLAMA_TEMPERATURE,
-            "top_p": OLLAMA_TOP_P,
-        }
-        if OLLAMA_MIROSTAT in (1, 2):
-            options["mirostat"] = OLLAMA_MIROSTAT
-            options["mirostat_tau"] = OLLAMA_MIROSTAT_TAU
-            options["mirostat_eta"] = OLLAMA_MIROSTAT_ETA
-        return options
-
-    def _build_generate_payload(self, model_name: str, prompt: str, stream: bool) -> dict[str, object]:
-        return {
-            "model": model_name,
-            "prompt": prompt,
-            "stream": stream,
-            "options": self._build_ollama_options(),
-        }
-
     def _build_inference_badge(
         self, payload: dict[str, object], elapsed_seconds: float | None = None
     ) -> str | None:
@@ -1640,13 +1682,11 @@ class AxiomLMApp(App):
 
     def _run_non_stream_completion(self, model_name: str, prompt: str) -> tuple[str, str | None]:
         started = time.monotonic()
-        with Client(timeout=120.0) as client:
-            response = client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json=self._build_generate_payload(model_name, prompt, stream=False),
-            )
-            response.raise_for_status()
-            payload = response.json()
+        payload = OllamaClient().generate(
+            prompt, model=model_name, stream=False, think=False
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError("Ollama returned a stream for a non-stream request.")
         completion = str(payload.get("response", "")).strip()
         telemetry_badge = self._build_inference_badge(payload, time.monotonic() - started)
         return completion, telemetry_badge
@@ -1809,10 +1849,16 @@ class AxiomLMApp(App):
             self.notify("Only .pdf files are supported.", severity="error")
             return
 
+        workload_token = self._try_acquire_workload("ingest")
+        if workload_token is None:
+            self.notify("GPU work is busy with ingestion or generation. Try again when it finishes.", severity="warning")
+            return
+
         mode_select = self.query_one("#ocr_mode_select", Select)
         mode_value = str(mode_select.value) if mode_select.value and mode_select.value != Select.BLANK else "auto"
 
         self._is_parsing = True
+        self._parse_workload_token = workload_token
         self._parse_started_at = time.monotonic()
         self._parse_target_progress = 8.0
         self._set_parse_controls_enabled(False)
@@ -1832,15 +1878,24 @@ class AxiomLMApp(App):
             AssistantMessage(f"Starting parse + index for `{pdf_path.name}` using `{mode_value}` mode.")
         )
 
-        self.run_worker(
-            lambda: self._parse_and_index_worker(str(pdf_path), mode_value),
-            thread=True,
-            group="parse",
-            exclusive=True,
-            exit_on_error=False,
-        )
+        try:
+            self.run_worker(
+                lambda: self._parse_and_index_worker(str(pdf_path), mode_value, workload_token),
+                thread=True,
+                group="parse",
+                exclusive=True,
+                exit_on_error=False,
+            )
+        except Exception:
+            self._release_workload(workload_token)
+            self._parse_workload_token = None
+            self._is_parsing = False
+            self._set_parse_controls_enabled(True)
+            raise
 
-    def _parse_and_index_worker(self, pdf_path: str, mode: str) -> None:
+    def _parse_and_index_worker(
+        self, pdf_path: str, mode: str, workload_token: str
+    ) -> None:
         try:
             from . import checkpoint
             from .ocr import resolve_mode
@@ -1961,6 +2016,8 @@ class AxiomLMApp(App):
                 pdf.stem,
                 "--reindex",
             ]
+            if not use_gpu_for_embeddings:
+                index_cmd.append("--allow-cpu-embeddings")
             index_log = logs_dir / f"{pdf.stem}_{run_stamp}_index.log"
             self._write_stage_log(index_log, index_cmd, parse_env, "")
             index_code, index_output = self._run_external_job(
@@ -2004,6 +2061,10 @@ class AxiomLMApp(App):
                 0,
                 f"{exc.__class__.__name__}: {detail}",
             )
+        finally:
+            self._release_workload(workload_token)
+            if self._parse_workload_token == workload_token:
+                self._parse_workload_token = None
 
     @staticmethod
     def _is_mineru_available() -> bool:
@@ -2025,21 +2086,26 @@ class AxiomLMApp(App):
         live_log_path: Path | None = None,
         timeout_seconds: int | None = None,
     ) -> tuple[int, str]:
-        proc = subprocess.Popen(
-            command,
-            cwd=str(self._project_root()),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            bufsize=1,
-            env=env,
-            start_new_session=True,
-        )
+        with self._process_lock:
+            if self._process_shutdown_started:
+                raise RuntimeError("TUI is shutting down; refusing to start an external job.")
+            proc = subprocess.Popen(
+                command,
+                cwd=str(self._project_root()),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                bufsize=1,
+                env=env,
+                start_new_session=True,
+            )
+            self._active_processes.add(proc)
         lines: list[str] = []
-        log_handle = live_log_path.open("a", encoding="utf-8") if live_log_path is not None else None
+        log_handle = None
         line_queue: Queue[str | None] = Queue()
         timed_out = False
+        reader: Thread | None = None
         timeout_at = (
             time.monotonic() + float(timeout_seconds)
             if timeout_seconds is not None and timeout_seconds > 0
@@ -2060,10 +2126,11 @@ class AxiomLMApp(App):
                     pass
                 line_queue.put(None)
 
-        reader = Thread(target=_reader, daemon=True)
-        reader.start()
-
         try:
+            if live_log_path is not None:
+                log_handle = live_log_path.open("a", encoding="utf-8")
+            reader = Thread(target=_reader, daemon=True)
+            reader.start()
             while True:
                 if timeout_at is not None and time.monotonic() >= timeout_at:
                     timed_out = True
@@ -2109,11 +2176,62 @@ class AxiomLMApp(App):
                     returncode = proc.wait()
             else:
                 returncode = proc.wait()
+        except BaseException:
+            self._stop_process_group(proc)
+            raise
         finally:
-            if log_handle is not None:
-                log_handle.close()
+            try:
+                # A normal leader exit can leave grandchildren alive in its session.
+                if self._process_group_exists(proc):
+                    self._stop_process_group(proc)
+            finally:
+                try:
+                    if reader is not None:
+                        reader.join(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+                    elif proc.stdout is not None:
+                        proc.stdout.close()
+                    if log_handle is not None:
+                        log_handle.close()
+                finally:
+                    with self._process_lock:
+                        self._active_processes.discard(proc)
         output = "\n".join(lines)
         return returncode, output
+
+    def _terminate_active_processes(self) -> None:
+        with self._process_lock:
+            self._process_shutdown_started = True
+            processes = list(self._active_processes)
+        for proc in processes:
+            self._stop_process_group(proc)
+
+    @classmethod
+    def _stop_process_group(cls, proc: subprocess.Popen[str]) -> None:
+        """Stop a process session, checking descendants after the leader exits."""
+        cls._terminate_process_group(proc)
+        deadline = time.monotonic() + PROCESS_TERMINATE_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            proc.poll()
+            if not cls._process_group_exists(proc):
+                break
+            time.sleep(0.05)
+        if cls._process_group_exists(proc):
+            cls._kill_process_group(proc)
+        try:
+            proc.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            cls._kill_process_group(proc)
+            proc.wait()
+
+    @staticmethod
+    def _process_group_exists(proc: subprocess.Popen[str]) -> bool:
+        try:
+            os.killpg(proc.pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
 
     @staticmethod
     def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
@@ -2175,9 +2293,10 @@ class AxiomLMApp(App):
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        if use_gpu_for_embeddings and AxiomLMApp._torch_cuda_available():
+        if use_gpu_for_embeddings:
             env["AXIOM_EMBED_DEVICE"] = "cuda"
-            env.setdefault("CUDA_VISIBLE_DEVICES", "0")
+            if AxiomLMApp._torch_cuda_available():
+                env.setdefault("CUDA_VISIBLE_DEVICES", "0")
         else:
             env["AXIOM_EMBED_DEVICE"] = "cpu"
         return env
@@ -2262,21 +2381,7 @@ class AxiomLMApp(App):
 
     def _release_ollama_models(self) -> None:
         """Unload currently loaded Ollama models so OCR has free VRAM."""
-        try:
-            with Client(timeout=8.0) as client:
-                response = client.get(f"{OLLAMA_URL}/api/ps")
-                response.raise_for_status()
-                loaded = response.json().get("models", [])
-                for model in loaded:
-                    name = model.get("name")
-                    if not name:
-                        continue
-                    client.post(
-                        f"{OLLAMA_URL}/api/generate",
-                        json={"model": name, "prompt": "", "stream": False, "keep_alive": 0},
-                    )
-        except Exception:
-            return
+        OllamaClient().unload_and_wait()
 
     async def _finish_parse_and_index(
         self, book_stem: str, page_count: int, chunk_count: int, error_message: str
