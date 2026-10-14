@@ -16,6 +16,7 @@ build/
 dist/
 *.egg-info/
 .ruff_cache/
+.pytest_cache/
 
 # Virtual environments
 .venv/
@@ -48,8 +49,13 @@ tmp_test/
 
 # Local agent & planning files (not tracked on GitHub)
 AGENTS.md
+ARCHITECTURE.md
 CLAUDE.md
+MEMORY.md
+PHASES.md
 PRD.md
-memory.md
+RULES.md
 architecture.md
-
+memory.md
+.superpowers/
+docs/superpowers/
