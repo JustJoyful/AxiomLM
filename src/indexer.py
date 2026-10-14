@@ -15,7 +15,8 @@ import chromadb
 
 from src import checkpoint
 from src.config import CHUNK_OVERLAP, CHUNK_SIZE, PARSED_MD, VECTOR_STORE
-from src.db import get_collection
+from src.db import get_collection, release_ingest_model
+from src.llm import OllamaClient
 
 TOKEN_TO_WORD_RATIO = 0.75
 
@@ -387,41 +388,56 @@ def _build_chunk_data_with_pages(
 def index_chunks_with_pages(
     book_stem: str,
     chunk_data: list[tuple[str, int, dict[str, str | int]]],
+    *,
+    allow_cpu_embeddings: bool = False,
 ) -> int:
     """
     Index chunks into ChromaDB with page-aware metadata.
     """
-    col = get_collection(book_stem)
+    col = get_collection(book_stem, allow_cpu_ingest=allow_cpu_embeddings)
     docs: list[str] = []
     metadatas: list[dict[str, str | int]] = []
     ids: list[str] = []
     batches_inserted = 0
     batch_size = 100
+    metadata = dict(col.metadata or {})
+    metadata["axiom_index_status"] = "building"
+    col.modify(metadata=metadata)
 
-    for idx, (chunk_text, physical_page, metadata) in enumerate(chunk_data):
-        meta: dict[str, str | int] = dict(metadata) if metadata else {}
-        meta["physical_page"] = int(physical_page)
-        meta.setdefault("page", int(physical_page))
-        meta.setdefault("source", book_stem)
+    try:
+        for idx, (chunk_text, physical_page, chunk_metadata) in enumerate(chunk_data):
+            meta: dict[str, str | int] = dict(chunk_metadata) if chunk_metadata else {}
+            meta["physical_page"] = int(physical_page)
+            meta.setdefault("page", int(physical_page))
+            meta.setdefault("source", book_stem)
 
-        docs.append(chunk_text)
-        metadatas.append(meta)
-        ids.append(f"{book_stem}_chunk_{idx:08d}")
+            docs.append(chunk_text)
+            metadatas.append(meta)
+            ids.append(f"{book_stem}_chunk_{idx:08d}")
 
-        if len(docs) >= batch_size:
+            if len(docs) >= batch_size:
+                print(f"    -> Adding batch {batches_inserted + 1}...")
+                col.add(documents=docs, metadatas=metadatas, ids=ids)
+                batches_inserted += 1
+                docs, metadatas, ids = [], [], []
+
+        if docs:
             print(f"    -> Adding batch {batches_inserted + 1}...")
             col.add(documents=docs, metadatas=metadatas, ids=ids)
-            batches_inserted += 1
-            docs, metadatas, ids = [], [], []
 
-    if docs:
-        print(f"    -> Adding batch {batches_inserted + 1}...")
-        col.add(documents=docs, metadatas=metadatas, ids=ids)
-
-    return len(chunk_data)
+        metadata["axiom_index_status"] = "ready"
+        col.modify(metadata=metadata)
+        return len(chunk_data)
+    finally:
+        release_ingest_model()
 
 
-def index_book(book_stem: str, reindex: bool = False) -> int:
+def index_book(
+    book_stem: str,
+    reindex: bool = False,
+    *,
+    allow_cpu_embeddings: bool = False,
+) -> int:
     """
     Parse a parsed full.md file, chunk it semantically using LangChain,
     and index it via embeddings into ChromaDB.
@@ -437,7 +453,7 @@ def index_book(book_stem: str, reindex: bool = False) -> int:
         from langchain_text_splitters import MarkdownHeaderTextSplitter
     except ImportError as exc:
         raise ImportError(
-            "Langchain text splitters not installed. Please run: pip install langchain langchain-community"
+            "LangChain text splitters are missing. Sync the project with `uv sync --extra cuda` (or `--extra cpu`)."
         ) from exc
 
     md_path = PARSED_MD / book_stem / "full.md"
@@ -484,7 +500,9 @@ def index_book(book_stem: str, reindex: bool = False) -> int:
     print(f"Chunk quality: {quality}")
     _enforce_chunk_quality(quality)
     print(f"Produced {total_chunks} chunk segments. Getting DB Connection...")
-    return index_chunks_with_pages(book_stem, chunk_data)
+    return index_chunks_with_pages(
+        book_stem, chunk_data, allow_cpu_embeddings=allow_cpu_embeddings
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -495,14 +513,29 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Delete existing collection and re-index from scratch.",
     )
+    parser.add_argument(
+        "--allow-cpu-embeddings",
+        action="store_true",
+        help="Explicitly allow degraded CPU embedding ingestion when CUDA is unavailable.",
+    )
     return parser
 
-if __name__ == "__main__":
-    args = _build_parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
     print("=========================================")
     print(" AxiomLM Semantic Indexer")
     print("=========================================")
-    chunks = index_book(args.book_stem, reindex=args.reindex)
+    OllamaClient().unload_and_wait()
+    chunks = index_book(
+        args.book_stem,
+        reindex=args.reindex,
+        allow_cpu_embeddings=args.allow_cpu_embeddings,
+    )
     print("=========================================")
     print(f" Success! Embedded {chunks} chunks for '{args.book_stem}' into vector database.")
     print("=========================================")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
