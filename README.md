@@ -1,316 +1,143 @@
 <div align="center">
 
-![alt text](AxiomLM.png)
+![AxiomLM logo](AxiomLM.png)
 
 ### Your Textbooks. Locally. Answered.
 
-**A fully local, privacy-first RAG study assistant that lives in your terminal.**  
-Turn dense engineering mathematics and CS textbooks into cited, instant answers. 100% offline. Zero cloud dependencies. No GPU lockups.
+A terminal study assistant for STEM and computer science textbooks, powered by local Ollama inference and book retrieval.
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
-![Ollama](https://img.shields.io/badge/Ollama-qwen3:4b-black?style=flat-square)
+![Ollama](https://img.shields.io/badge/Runtime-Ollama-black?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Linux-orange?style=flat-square)
 
 </div>
 
----
+## Project status
 
-## Table of Contents
+AxiomLM is preparing a phased overhaul. The working baseline parses PDFs, indexes books and answers questions through a Textual TUI. The roadmap below describes **planned work**, not shipped features. OCR/scanned-PDF processing is frozen; effort moves to model lifecycle, UI, retrieval, tools and evaluation.
 
-- [What is AxiomLM?](#what-is-axiomlm)
-- [Screenshots](#screenshots)
-- [Features](#features)
-- [Models Used](#models-used)
-- [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [Installation](#installation)
-- [Documentation](#documentation)
-  - [Parsing PDFs](#parsing-pdfs)
-  - [Smart Routing Heuristics (Clean vs Scanned)](#smart-routing-heuristics-clean-vs-scanned)
-  - [How the Engines Work](#how-the-engines-work)
-  - [Tuning K and D Values](#tuning-k-and-d-values)
-  - [Why Scanned PDFs Take Longer](#why-scanned-pdfs-take-longer)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
+Core inference stays local with no silent cloud API fallback. Once models/dependencies are downloaded, the current book chat path can run offline. Planned web search/fetch are explicit evidence tools and require internet. A separate manually triggered Ask cloud button is optional, last, and outside core routing.
 
----
+## Available today
 
-## What is AxiomLM?
+- Textual terminal chat with local Ollama generation and model selection.
+- Per-book ChromaDB collections and Jina asymmetric retrieval embeddings.
+- Header/boundary-aware overlapping chunks with physical-page metadata.
+- Follow-up context reuse, page-aware queries and source cues; citations are not yet checked by an entailment model.
+- PDF engine selection, parse/index progress and resumable page checkpoints.
+- Response/code copy actions via the current `pyperclip` helper.
 
-Studying dense engineering mathematics and computer science textbooks with cloud AI is broken—full books exceed reliable reasoning limits, cloud uploads compromise privacy, and complex mathematical formulas get distorted.
-
-**AxiomLM is a fully local, privacy-first RAG study assistant that lives in your terminal.** Point it at your textbooks, lecture notes, or past papers—clean or scanned—and get instant, grounded answers with exact book, chapter, and page citations. Everything runs 100% offline on your own machine.
-
----
+The configured target is **Qwen3.5-4B Q4_K_M**, using the exact Ollama tag `qwen3.5:4b-q4_K_M`. Phase 0 acceptance passed on the RTX 3050 6GB development machine: Ollama 0.40.4 tool-calling, GPU generation at the 4096-token context limit, unload, CUDA Jina ingestion/release, and CPU live-query placement have recorded evidence. The baseline comparison uses a retrospective reconstruction with truncated before answers, so answer-quality comparisons are directional. Maintainer-local status and evidence are recorded in PHASES.md and MEMORY.md; those files are not part of the public README distribution.
 
 ## Screenshots
-![alt text](image-2.png)
-![alt text](image-1.png)
-![alt text](image.png)
 
----
+These show the current interface, before the planned overhaul.
 
-## Features
+![Current AxiomLM chat interface](image-2.png)
+![Current AxiomLM study response](image-1.png)
+![Current AxiomLM terminal layout](image.png)
 
-**Core**
-- Fully local RAG pipeline — no data ever leaves your machine
-- Smart PDF routing — automatically detects clean vs scanned PDFs and picks the right parser without GPU lockup
-- Conversation memory — follow-up questions like "give me an example of this" work correctly
-- Cited answers — every response shows the source book, chapter, and page number
-- Multi-book support — index multiple books and switch between them in the same session
-- Checkpoint/resume system — long parses resume from where they left off if interrupted
-- GPU acceleration — uses your NVIDIA GPU for faster parsing when available
+## Setup and use
 
-**Interface**
-- Terminal-native TUI built with Textual
-- ASCII logo with cyan color scheme
-- Live parsing progress with ETA and chunk stats
-- Token speed and response time displayed per answer
-- Copy and Code buttons on every response
-- Keyboard-driven — `^q` quit, `^l` clear, `^d` delete book
+Linux, Python 3.11+, and [uv](https://docs.astral.sh/uv/getting-started/installation/) are required. Install [Ollama](https://ollama.com/) and start its local service. The primary overhaul target is a Linux/Niri/Wayland laptop with an RTX 3050 6GB GPU and 16GB RAM. Runtime defaults, paths and tuning parameters live in `src/config.py`.
 
-**Parsing Engines**
-- `pymupdf4llm` — instant direct parsing for clean digital PDFs (<10s for 200+ pages)
-- `MinerU` — GPU-accelerated OCR for scanned and complex PDFs, with batched processing to prevent VRAM exhaustion
-- `Marker` — manual option for clean math-heavy PDFs (requires 8GB+ VRAM)
-
----
-
-## Models Used
-
-| Role | Model | Purpose |
-|---|---|---|
-| **LLM** | Ollama (default: `qwen3:4b`) | Dense reasoning, LaTeX formula comprehension, and strict citation formatting |
-| **Embeddings** | `jinaai/jina-embeddings-v5-text-nano` | Asymmetric semantic retrieval (`Document: ` / `Query: `) |
-| **OCR (scanned PDFs)** | MinerU `hybrid-auto-engine` | Extracting text and formulas from photographed/scanned pages |
-
-AxiomLM defaults to `qwen3:4b` for superior mathematical reasoning, code comprehension, and strict instruction-following within a lightweight (~2.5–3.0 GB VRAM) footprint. You can also switch to Qwen 2.5 Coder, DeepSeek, or any other Ollama model from the dropdown.
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| **TUI Framework** | Textual |
-| **LLM Runtime** | Ollama (`qwen3:4b`) |
-| **Vector Database** | ChromaDB (persistent, local) |
-| **Embeddings** | Sentence Transformers + Jina v5 Nano |
-| **PDF Parsing (clean)** | pymupdf4llm |
-| **PDF Parsing (scanned)** | MinerU |
-| **PDF Parsing (math)** | Marker (manual, GPU-heavy) |
-| **GPU Acceleration** | PyTorch + CUDA |
-| **Language** | Python 3.11+ |
-
----
-
-## Project Structure
-
-```
-AxiomLM/
-├── src/
-│   ├── tui.py           # Main TUI application — all UI logic, RAG pipeline, chat handler
-│   ├── ocr.py           # Unified OCR entry point — smart auto-routing heuristic
-│   ├── ocr_marker.py    # Marker runner for clean math PDFs
-│   ├── ocr_mineru.py    # MinerU runner for scanned PDFs — batched, resumable
-│   ├── ocr_pymupdf4llm.py # pymupdf4llm runner for clean digital PDFs
-│   ├── indexer.py       # Header-aware chunking and indexing into ChromaDB
-│   ├── db.py            # ChromaDB client, Jina v5 embeddings, collection management
-│   ├── checkpoint.py    # Per-page checkpoint system for resumable parsing
-│   ├── preprocessor.py  # Text cleaning and normalization before indexing
-│   ├── config.py        # Single source of truth: configuration constants & thresholds
-│   └── __init__.py
-├── scripts/             # Setup and validation scripts
-├── data/                # Local data directory (gitignored)
-│   ├── parsed_md/       # Per-book parsed markdown files
-│   ├── checkpoints/     # Per-page parsing checkpoints
-│   └── vector_store/    # ChromaDB persistent storage
-├── pyproject.toml       # Package definition and entry point
-├── requirements.txt     # Python dependencies
-├── install.sh           # Deterministic one-command installer
-├── PRD.md               # Product Requirements Document
-├── ARCHITECTURE.md      # System Architecture Specification
-├── memory.md            # Persistent Project Memory & Decision Log
-└── README.md
-```
-
----
-
-## Installation
-
-### Requirements
-
-- Linux (tested on Arch Linux, Ubuntu, Fedora)
-- Python 3.11+
-- [Ollama](https://ollama.ai) installed and running
-- NVIDIA GPU recommended (e.g. RTX 3050 6GB or better for scanned PDF OCR)
-
-### One-Command Install
-
-```bash
-curl -sSL https://raw.githubusercontent.com/JustJoyful/AxiomLM/main/install.sh | bash
-```
-
-**What this script does step-by-step:**
-1. **Checks Dependencies:** Verifies Python 3.11+ and checks for a running `ollama` instance.
-2. **Creates Isolated Virtual Environment:** Generates `.venv/` using `python3 -m venv` and upgrades `pip`.
-3. **Installs Stable PyTorch Wheel:** Uninstalls conflicting system/CUDA libraries and installs CPU-optimized PyTorch (`torch torchvision --index-url https://download.pytorch.org/whl/cpu`) as a fail-safe against CUDA NCCL symbol collisions.
-4. **Installs Python Dependencies:** Installs all core packages from `requirements.txt`.
-5. **Installs AxiomLM in Dev Mode:** Executes `pip install -e ".[dev]"` so the CLI is immediately editable.
-6. **Creates PATH Launcher:** Generates an executable wrapper script at `~/.local/bin/axiomlm` that activates `.venv` and passes all arguments.
-
-### Manual Install
+Clone the project and run the installer. It syncs the pinned CUDA profile and development tools from `uv.lock`, then pulls the configured local Ollama model:
 
 ```bash
 git clone https://github.com/JustJoyful/AxiomLM.git
 cd AxiomLM
 bash install.sh
+source .venv/bin/activate
+uv run --no-sync python -m src.tui
 ```
 
-### Pull a Model
+`install.sh` delegates to `scripts/setup_env.sh`. Use `--cpu` for the pinned CPU Torch profile, `--no-model` to skip both the pinned Jina snapshot download and Ollama model pull, and `--dry-run` to inspect all setup commands without changing the environment. Normal setup downloads the configured Jina revision and pulls the configured Ollama model. The sync preserves separately installed optional OCR engines. Use `uv run --no-sync axiomlm` to launch the installed entry point. `pyproject.toml` declares dependencies and `uv.lock` pins their resolved versions; the installer uses `uv`'s cache rather than staging multi-gigabyte CUDA wheels in `/tmp`.
 
-AxiomLM defaults to `qwen3:4b`. Pull it through Ollama:
+The overhaul will require a tested pinned Textual 8.x release and GPU-capable ingest dependencies. Later phases add `wl-clipboard` for Wayland copying, Bubblewrap/cgroups v2/SymPy for execution, and Typst for PDFs. They are **planned prerequisites**, not capabilities enabled by this docs update.
+
+### Parse and query a book
+
+Enter an absolute PDF path in the TUI and select **Parse + Index**. Select the indexed book, then ask a question. Engine selection offers `auto`, `pymupdf4llm`, `mineru` and `marker`; heavy engines require their installed runtime and sufficient hardware. MinerU is installed separately when needed.
+
+The CLI extraction/indexing path is:
 
 ```bash
-ollama pull qwen3:4b
-# or for code-centric study:
-ollama pull qwen2.5-coder:7b
+uv run --no-sync python -m src.ocr --mode auto --pdf /absolute/path/to/book.pdf
+uv run --no-sync python -m src.indexer book
 ```
 
-### Run
+Replace `book` with the PDF stem. Existing collection replacement is explicit:
 
 ```bash
-axiomlm
+uv run --no-sync python -m src.indexer book --reindex
 ```
 
----
+Reindexing replaces that book's vector collection; retain the parsed page artifacts.
 
-## Documentation
+### Existing OCR behavior (frozen)
 
-### Parsing PDFs
+`src/ocr.py` is the unified entry point. PyMuPDF4LLM handles clean digital PDFs on CPU; MinerU handles scan-heavy PDFs with GPU batching/checkpoints; Marker remains a manual alternative for sufficiently capable hardware.
 
-To use AxiomLM, enter the full path to your PDF in the **Parse PDF** input and click **Parse + Index**.
+Auto-routing samples up to eight evenly spaced pages. It considers low extractable text and high image coverage, including image-heavy pages with an OCR text layer. MinerU is selected when at least half the samples are scan-like; thresholds and overrides remain in the existing code/configuration. Parse speed depends on the book, engine and hardware; old timing estimates are not guarantees.
 
-The app automatically detects whether the book is a clean digital PDF or a physical scan and routes it to the optimal parser. You can also manually pick an engine from the dropdown if you want to override auto-detection.
+Checkpoints are stored in `data/parsed_md/checkpoints/<book_stem>/page_NNNN.md`, merged Markdown in `data/parsed_md/<book_stem>/full.md`, and vectors in `data/vector_store`. Checkpoint indices begin at zero; cited physical PDF pages begin at one and may differ from printed book labels.
 
-Once parsing completes, the book appears in the **Loaded Books** panel with a chunk count. Click it and start querying.
+### Retrieval controls
 
----
+The current TUI exposes K (retrieval count) and D (distance cutoff). The current configured defaults are K=5 and D=1.5; consult `src/config.py` for changes. Lower distance admits closer matches; raising K adds context and generation cost. Phase 1 moves these controls behind settings; Phase 2 adds hybrid retrieval, and Phase 4 introduces the calibrated entailment gate/rank.
 
-### Smart Routing Heuristics (Clean vs Scanned)
+## Overhaul roadmap
 
-AxiomLM avoids the "black box" trap of sending clean documents to heavy OCR models.
+Build in order. Detailed acceptance criteria are in the maintainer's local `PRD.md`; the public scope summary is below.
 
-#### How the decision is made:
-1. **Uniform Sampling:** When mode is set to `auto`, `src/ocr.py` samples 8 pages spaced evenly throughout the entire document (e.g., pages 0, 71, 142, 213, 284, 355, 426, 499 for a 500-page book).
-2. **Metric Inspection:** Each sampled page is inspected via PyMuPDF for text character density ($T$) and image area coverage ($C$).
-3. **Scan-Like Classification:** A sampled page is counted as scan-like if:
-   - $(T \le 180 \text{ chars} \land C \ge 0.45)$, or
-   - $(T \le 60 \text{ chars} \land \text{has\_image\_block})$, or
-   - $(C \ge 0.90 \land \text{has\_image\_block})$ (catches full-page scans with hidden OCR text).
-4. **Majority Threshold:** The book is sent to MinerU **only if $\ge 50\%$ of the sampled pages** are classified as scan-like. Otherwise, it routes to `pymupdf4llm`.
+| Phase | Planned outcome |
+| --- | --- |
+| **0 — Foundation** | Exact Qwen3.5-4B Q4_K_M tag/digest; verified Ollama tool round-trip; GPU ingest, explicit release, CPU queries; local inference boundary |
+| **1 — Textual UI** | One accent and stylesheet, less chrome, settings-hidden K/D, native 8.x interaction, terminal ANSI themes, per-code/math `wl-copy` |
+| **2 — Context** | Chapter/section metadata, 8192-token non-overlapping contextual blocks and late chunking, follow-up rewriting, BM25 + dense search, direct 5–8 chunk synthesis |
+| **3 — Tools** | Local search, web search/fetch, sandboxed Python, PDF/citation tool interfaces; warm SymPy worker, verified solve flow and honest failure |
+| **4 — Trust** | One sub-100M CPU entailment model for gate/rank and citation checks; labeled per-book evaluation |
+| **5 — Study/documents** | Practice questions, coverage gaps, raw Typst → PDF with two retries maximum; optional flashcards |
 
-#### The "Page 4 Diagram" Case
-What happens if a 500-page clean digital PDF happens to have one scanned diagram on page 4?
-- Out of the 8 evenly sampled pages across the 500 pages, at most 1 page (or 0) will have an image.
-- The scan ratio evaluates to $\le 12.5\%$, far below the $50\%$ threshold.
-- **Result:** The document is safely routed to `pymupdf4llm`, finishing in under 10 seconds without locking your GPU for 40 minutes.
+Sandboxed Python uses Bubblewrap, network isolation and a cgroups v2 250M ceiling. The backend enforces a roughly 5s response deadline while preserving the warm worker; timeout cancellation and dead-worker recovery must be demonstrated before shipping.
 
-#### Preview & Overrides
-You always have manual control before committing your hardware:
-- **CLI Override:** `python -m src.ocr --mode pymupdf4llm /path/to/book.pdf`
-- **TUI Override:** Select `pymupdf4llm`, `mineru`, or `marker` from the **Engine** dropdown before clicking **Parse + Index**.
+Time-boxed floor: **Phases 0–2 plus the Phase 4 eval harness**. Begin labels/baseline before pipeline changes. Phase 3 is the most ambitious/time-consuming addition. Phase 1 may be explicitly deferred; Phase 1 and Phase 5 are the first permitted cuts, and flashcards are lowest priority. The floor does not require full Phase 3 or the Phase 4 trust scorer. No OCR overhaul, cloud routing, Pyodide or iterative map-reduce.
 
----
+## Repository map
 
-### How the Engines Work
-
-AxiomLM uses three specialized parsing engines:
-
-**pymupdf4llm — Clean Digital PDFs (Default for digital books)**
-Directly extracts text, tables, and formatting from PDF structures without OCR. For a 240-page textbook like *Think Python*, parsing finishes in under 10 seconds on CPU. Zero GPU VRAM used.
-
-**MinerU — Scanned and Complex PDFs**
-Used for physical books photographed or scanned page by page where text is embedded as bitmap pixels. Runs region detection, table recognition, and formula recognition (UnimerNet). Operates in GPU batches of 24 pages with VRAM flushing to prevent OOM errors on 6GB GPUs. Checkpoints each page (`page_NNNN.md`) so interrupted parses resume without recomputing.
-
-**Marker — Clean Math-Heavy PDFs (Manual)**
-Manual alternative for clean PDFs containing dense mathematical notation that standard text extractors might flatten. Requires 8GB+ VRAM; select manually from the dropdown when hardware permits.
-
----
-
-### Tuning K and D Values
-
-At the bottom of the chat panel:
-
-```
-K - 5 + D - 0.75 +
+```text
+src/
+  config.py          Runtime paths, models and tunable parameters
+  tui.py             Current Textual UI and query/ingest orchestration
+  db.py              ChromaDB and Jina embedding integration
+  indexer.py         Current chunking, metadata and indexing
+  clipboard.py       Current response/code copy helper
+  ocr.py             Frozen extraction entry point
+  ocr_*.py           Frozen extraction engines
+  checkpoint.py      Frozen per-page artifacts
+  preprocessor.py    Frozen preprocessing
+scripts/             Existing setup and page-validation utilities
+data/                Local parsed artifacts, vector indexes and logs
+PRD.md               Product scope, build order and acceptance gates
+ARCHITECTURE.md      Current baseline and target implementation contracts
+RULES.md             Mandatory development constraints
+AGENTS.md            Coding-agent entry point and commands
 ```
 
-- **K (Top Chunks):** Number of chunks retrieved from ChromaDB (default: 5). Higher values (8–10) provide broader context for wide conceptual questions like *"explain Green's theorem and its relation to Stokes' theorem."* Lower values (3–5) keep answers focused and fast.
-- **D (Distance Threshold):** Cosine distance cutoff (default: 0.75). Lower values are stricter, returning only high-similarity chunks. Higher values cast a wider net when seeking loosely phrased concepts.
+## Contributing and verification
 
----
-
-### Why Scanned PDFs Take Longer
-
-Scanned physical books contain images, not text characters. MinerU executes a full computer vision pipeline: region detection, layout analysis, optical character recognition, and math formula transcription.
-
-To run reliably on consumer GPUs like an RTX 3050 (6GB VRAM), MinerU processes in batches of 24 pages, flushes VRAM between batches, and commits page checkpoints to disk. Expect 5–10 minutes for a 100-page scanned document, and 30–40 minutes for a dense 500-page engineering textbook.
-
----
-
-## Roadmap
-
-### Study & Comprehension Tools
-- **Flashcard Export (Anki):** Automatically export key theorems, definitions, and code syntax into `.apkg` and TSV decks with full LaTeX math equation preservation (`$...$`).
-- **Knowledge Gap Tracker:** Diagnostic study mode that evaluates user question history against textbook chapter outlines to identify unmastered concepts and missing prerequisites.
-
-### UI Improvements
-- Fix ASCII logo rendering across different terminal font line-heights
-- Denser sidebar layout with Unicode glyphs (requires Nerd Fonts)
-- Subtle background pattern in the empty chat panel
-- Enhanced LaTeX-to-Unicode post-processing for cleaner terminal math rendering
-- Remove horizontal scrollbar from code blocks
-
-### Quality of Life
-- `@book` mention syntax to query a specific book without switching context
-- `/commands` for in-chat actions like `/clear`, `/books`, `/reindex`
-- Session export — save study conversations as Markdown
-- Automatic model warm-up on launch to eliminate first-token cold start
-- Per-book conversation history that persists across sessions
-
----
-
-## Contributing
-
-AxiomLM is actively developed. Contributions are welcome.
+When working in the maintainer's local workspace, read `AGENTS.md` and `RULES.md` before making changes. Those local documents, `PRD.md` and `ARCHITECTURE.md` are intentionally excluded from GitHub. The public phase summary above records the scope; contributors should confirm the applicable phase before implementation. Keep scope/status documentation aligned with actual code and preserve the frozen extraction pipeline. Runtime configuration belongs in `src/config.py`.
 
 ```bash
-# Fork and clone
-git clone https://github.com/YOUR_USERNAME/AxiomLM.git
-cd AxiomLM
-
-# Install in dev mode
-bash install.sh
-
-# Make your changes and check formatting
-.venv/bin/black src/
-.venv/bin/ruff check src/
+uv run --no-sync --extra dev ruff check src/ scripts/
+uv run --no-sync --extra dev black --check src/
+uv run --no-sync python scripts/validate_page_metadata.py book
+uv run --no-sync python scripts/validate_page_querying.py book "sample question"
 ```
 
----
+The validation scripts require an indexed book. They check existing metadata/query behavior; they are not the planned labeled eval harness. Future pipeline changes require before/after retrieval precision/recall, citation accuracy and hallucination measurements. Use `type(scope): description` commit messages.
 
 ## License
 
-MIT — free to use, fork, and adapt.
-
----
-
-<div align="center">
-
-Built by a student, for students.  
-**Your Textbooks. Locally. Answered.**
-
-</div>
+MIT, as declared in `pyproject.toml`.
