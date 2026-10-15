@@ -1,49 +1,34 @@
-"""
-tui.py — AxiomLM Terminal UI for querying documents.
+"""Command-driven Textual study stream and local workload orchestration."""
 
-Provides a Textual application with a sidebar to switch between indexed textbooks,
-and a chat panel to interact with Qwen via Ollama using RAG.
-"""
-
+import asyncio
 import importlib.util
+import math
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock, Thread
-from typing import Callable
+from typing import ClassVar
 from uuid import uuid4
 
 from httpx import Client, ConnectError, HTTPStatusError, ReadTimeout
-from rich.markdown import Markdown as RichMarkdown
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer, Vertical
-from textual.message import Message
+from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual.screen import ModalScreen
-from textual.timer import Timer
-from textual.worker import Worker
-from textual.widgets import (
-    Button,
-    Footer,
-    Header,
-    Input,
-    Label,
-    ListItem,
-    ListView,
-    ProgressBar,
-    Select,
-    Static,
-    TextArea,
-)
+from textual.widgets import Static
+from textual.worker import WorkerCancelled, WorkerFailed
 
+from . import config
+from .clipboard import copy_text
 from .config import (
     DISTANCE_THRESHOLD,
     INDEX_TIMEOUT_SECONDS,
@@ -56,123 +41,70 @@ from .config import (
     PYMUPDF4LLM_OCR_TIMEOUT_SECONDS,
     TOP_K_RESULTS,
 )
-from .clipboard import copy_to_clipboard, extract_code_blocks
-from .db import (
-    delete_collection,
-    embed_query,
-    ensure_collection_ready,
-    get_collection,
-    list_collections,
-)
 from .llm import OllamaClient
-from .workloads import WorkloadCoordinator, WorkloadKind
-from .page_querying import (
-    build_citation as build_page_citation,
-    extract_page_intent as parse_page_intent,
-    strip_model_footnotes,
+from .page_querying import build_citation as build_page_citation
+from .page_querying import extract_page_intent as parse_page_intent
+from .page_querying import strip_model_footnotes
+from .ui.commands import (
+    COMMANDS,
+    AxiomCommandProvider,
+    CommandOverlay,
+    dispatch_command,
 )
+from .ui.motion import MotionClock, StudyScreen, render_progress
+from .ui.prompt import QueryComposer, complete_pdf_path
+from .ui.render import SafeAnswerBuffer, extract_fenced_blocks
+from .ui.render import normalize_math as latex_to_unicode
+from .ui.settings import load_settings, save_theme_selection
+from .ui.stream import SourceRef, StudyStream, TurnRecord, TurnView
+from .ui.terminal import PaletteDriver
+from .ui.themes import (
+    ANSI_COLORS,
+    THEMES,
+    ThemePreview,
+    load_custom_themes,
+    resolve_theme,
+)
+from .workloads import WorkloadCoordinator, WorkloadKind
 
 
-def latex_to_unicode(text: str) -> str:
-    """
-    Post-process response to replace LaTeX math with readable Unicode symbols.
-    Strips $$ and $ delimiters and handles common symbols/notations.
-    """
-    # 1. Strip structural delimiters and sizing commands
-    text = re.sub(r"\$\$(.+?)\$\$", r"\1", text, flags=re.DOTALL)
-    text = re.sub(r"\$(.+?)\$", r"\1", text)
-    text = re.sub(r"\\left\s*|\\right\s*|\\big\s*|\\Big\s*|\\bigg\s*|\\Bigg\s*", "", text)
-    text = re.sub(r"\\text\s*\{\s*(.+?)\s*\}", r"\1", text)
+# Delay embedding/database imports until background discovery or retrieval.
+def list_collections():
+    from .db import list_collections as operation
 
-    # 2. Symbol replacements (Comprehensive Math/Science library)
-    # Using \s* to handle cases where the LLM adds spaces inside LaTeX commands
-    replacements = {
-        # Fractions and basic
-        r"\\frac\s*\{\s*(.+?)\s*\}\s*\{\s*(.+?)\s*\}": lambda m: f"({m.group(1)})/({m.group(2)})",
-        r"\\sqrt\s*\{\s*(.+?)\s*\}": lambda m: f"√({m.group(1)})",
-        r"\\cdot\b": "·",
-        r"\\times\b": "×",
-        r"\\pm\b": "±",
-        r"\\mp\b": "∓",
-        r"\\div\b": "÷",
+    return operation()
 
-        # Comparison
-        r"\\leq\b": "≤",
-        r"\\geq\b": "≥",
-        r"\\neq\b": "≠",
-        r"\\approx\b": "≈",
-        r"\\cong\b": "≅",
-        r"\\equiv\b": "≡",
-        r"\\propto\b": "∝",
-        r"\\ll\b": "≪",
-        r"\\gg\b": "≫",
 
-        # Greek Lowercase
-        r"\\alpha\b": "α", r"\\beta\b": "β", r"\\gamma\b": "γ", r"\\delta\b": "δ",
-        r"\\epsilon\b": "ε", r"\\zeta\b": "ζ", r"\\eta\b": "η", r"\\theta\b": "θ",
-        r"\\iota\b": "ι", r"\\kappa\b": "κ", r"\\lambda\b": "λ", r"\\mu\b": "μ",
-        r"\\nu\b": "ν", r"\\xi\b": "ξ", r"\\pi\b": "π", r"\\rho\b": "ρ",
-        r"\\sigma\b": "σ", r"\\tau\b": "τ", r"\\upsilon\b": "υ", r"\\phi\b": "φ",
-        r"\\chi\b": "χ", r"\\psi\b": "ψ", r"\\omega\b": "ω",
+def get_collection(book):
+    from .db import get_collection as operation
 
-        # Greek Uppercase
-        r"\\Gamma\b": "Γ", r"\\Delta\b": "Δ", r"\\Theta\b": "Θ", r"\\Lambda\b": "Λ",
-        r"\\Xi\b": "Ξ", r"\\Pi\b": "Π", r"\\Sigma\b": "Σ", r"\\Upsilon\b": "Υ",
-        r"\\Phi\b": "Φ", r"\\Psi\b": "Ψ", r"\\Omega\b": "Ω",
+    return operation(book)
 
-        # Math Symbols
-        r"\\sum\b": "∑",
-        r"\\int\b": "∫",
-        r"\\prod\b": "∏",
-        r"\\infty\b": "∞",
-        r"\\partial\b": "∂",
-        r"\\nabla\b": "∇",
-        r"\\angle\b": "∠",
-        r"\\triangle\b": "△",
-        r"\\hbar\b": "ħ",
 
-        # Set theory & Logic
-        r"\\in\b": "∈",
-        r"\\notin\b": "∉",
-        r"\\forall\b": "∀",
-        r"\\exists\b": "∃",
-        r"\\cap\b": "∩",
-        r"\\cup\b": "∪",
-        r"\\subset\b": "⊂",
-        r"\\subseteq\b": "⊆",
-        r"\\supset\b": "⊃",
-        r"\\supseteq\b": "⊇",
-        r"\\emptyset\b": "∅",
-        r"\\land\b": "∧",
-        r"\\lor\b": "∨",
-        r"\\neg\b": "¬",
+def embed_query(query):
+    from .db import embed_query as operation
 
-        # Arrows
-        r"\\rightarrow\b": "→",
-        r"\\Rightarrow\b": "⇒",
-        r"\\leftarrow\b": "←",
-        r"\\Leftarrow\b": "⇐",
-        r"\\leftrightarrow\b": "↔",
-        r"\\Leftrightarrow\b": "⇔",
-    }
+    return operation(query)
 
-    for pattern, replacement in replacements.items():
-        text = re.sub(pattern, replacement, text)
-        text = re.sub(pattern, replacement, text)
 
-    # 3. Simple Subscripts and Superscripts (Common in Science)
-    sub_super = {
-        r"\^2\b": "²", r"\^3\b": "³", r"\^n\b": "ⁿ",
-        r"_2\b": "₂", r"_3\b": "₃", r"_4\b": "₄",
-        r"_n\b": "ₙ", r"_i\b": "ᵢ", r"_j\b": "ⱼ",
-        r"_x\b": "ₓ", r"_y\b": "ᵧ",
-    }
-    for pattern, replacement in sub_super.items():
-        text = re.sub(pattern, replacement, text)
-        text = re.sub(pattern, replacement, text)
+def ensure_collection_ready(collection):
+    from .db import ensure_collection_ready as operation
 
-    return text
+    return operation(collection)
 
+
+def delete_collection(book):
+    from .db import delete_collection as operation
+
+    return operation(book)
+
+
+LOGO = """ █████╗ ██╗  ██╗██╗ ██████╗ ███╗   ███╗
+██╔══██╗╚██╗██╔╝██║██╔═══██╗████╗ ████║
+███████║ ╚███╔╝ ██║██║   ██║██╔████╔██║
+██╔══██║ ██╔██╗ ██║██║   ██║██║╚██╔╝██║
+██║  ██║██╔╝ ██╗██║╚██████╔╝██║ ╚═╝ ██║
+╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝ ╚═╝     ╚═╝"""
 
 PROMPT_TEMPLATE = """You are Axie, a study assistant built into a terminal UI. Responses render in a Rich-enabled terminal supporting markdown tables and markup.
 
@@ -181,8 +113,8 @@ Important: You have access to conversation history below. Use it only to underst
 Formatting rules:
 - Use **bold** for key terms and important values
 - Use `code` for inline code/symbols, triple backticks for code blocks with language tag
-- Avoid LaTeX commands like \frac, \left, \right, or \text. Use plain notation like P(A∩B)/P(A).
-- Use a simple pipe | or forward slash / for math. NEVER use backslashes followed by spaces or slashes (like \ /).
+- Avoid LaTeX commands like \frac, \\left, \right, or \text. Use plain notation like P(A∩B)/P(A).
+- Use a simple pipe | or forward slash / for math. NEVER use backslashes followed by spaces or slashes (like \\ /).
 - If the user asks for examples/questions, prioritize any retrieved sections titled 'Illustrative Examples', 'Exercises', or 'Solved Problems'.
 - Use the pipe symbol | for conditional probability, e.g., P(B|A). Never use fractions for this.
 - For Chemistry, use subscripts like H₂O or CO₂. For Physics, use common superscripts like m/s² when possible.
@@ -201,1141 +133,1559 @@ Current question: {question}
 Evidence rules override formatting and verbosity: Every factual sentence must be supported by a retrieved excerpt. Conversation history is never evidence; use it only to resolve references. If retrieved context does not support the answer, say only: 'The indexed material does not provide enough evidence to answer this question.' If it supports only part of the answer, state only those supported facts and identify the gap. Never infer book content from its title, previous answers, or general knowledge. Do not invent or alter examples or code; reuse only examples present in retrieved context. Do not write citations; the application adds citations from retrieved page metadata."""
 
 
-class QueryComposer(TextArea):
-    """Multi-line query input: Enter sends, Shift+Enter inserts newline."""
-
-    BINDINGS = [
-        Binding("enter", "submit_query", show=False, priority=True),
-        Binding("shift+enter", "insert_soft_newline", show=False, priority=True),
-    ]
-
-    class Submitted(Message):
-        """Posted when the user submits the query composer."""
-
-        def __init__(self, composer: "QueryComposer", value: str) -> None:
-            super().__init__()
-            self.composer = composer
-            self.value = value
-
-    def action_submit_query(self) -> None:
-        self.post_message(self.Submitted(self, self.text))
-
-    def action_insert_soft_newline(self) -> None:
-        self.insert("\n")
-
-
-
-class UserMessage(Static):
-    """Styled chat block for user messages."""
-
-    DEFAULT_CSS = """
-    UserMessage {
-        margin: 1 6 0 2;
-        padding: 0 1;
-        border-left: tall ansi_cyan;
-        background: transparent;
-    }
-
-    UserMessage .message-label {
-        color: ansi_cyan;
-        text-style: bold;
-    }
-    UserMessage .message-content {
-        color: ansi_white;
-        height: auto;
-    }
-    """
-
-    def __init__(self, content: str) -> None:
-        super().__init__()
-        self._content = content
-
-    def compose(self) -> ComposeResult:
-        yield Label("You", classes="message-label")
-        yield Static(RichMarkdown(self._content), classes="message-content")
-
-
-class AssistantMessage(Static):
-    """Styled chat block for assistant messages."""
-
-    thinking = reactive(False)
-    dots = reactive(0)
-
-    DEFAULT_CSS = """
-    AssistantMessage {
-        margin: 1 6 0 2;
-        padding: 0 1;
-        border-left: tall ansi_green;
-        background: transparent;
-    }
-
-    AssistantMessage.error {
-        border-left: tall ansi_red;
-    }
-
-    AssistantMessage .message-label {
-        color: ansi_green;
-        text-style: bold;
-    }
-
-    AssistantMessage.error .message-label {
-        color: ansi_red;
-    }
-    AssistantMessage .message-content {
-        color: ansi_white;
-        border: none;
-        background: transparent;
-        margin: 0;
-        padding: 0;
-        height: auto;
-    }
-
-    AssistantMessage .message-telemetry {
-        display: none;
-        color: ansi_bright_black;
-        text-style: dim italic;
-        margin-top: 1;
-    }
-
-    AssistantMessage .message-telemetry.visible {
-        display: block;
-    }
-
-    AssistantMessage .message-toolbar {
-        display: none;
-        margin-top: 1;
-        height: auto;
-        background: transparent;
-    }
-
-    AssistantMessage .message-toolbar.visible {
-        display: block;
-    }
-
-    AssistantMessage .copy-btn {
-        width: auto;
-        min-width: 12;
-        margin: 0 1 0 0;
-        border: round ansi_bright_black;
-        background: transparent;
-    }
-
-    AssistantMessage .copy-status {
-        color: ansi_bright_black;
-        text-style: dim;
-        width: 1fr;
-        content-align: left middle;
-    }
-    """
-
-    def __init__(
-        self,
-        content: str = "",
-        thinking: bool = False,
-        is_error: bool = False,
-        telemetry_badge: str | None = None,
-    ) -> None:
-        super().__init__()
-        self._content = content
-        self._is_error = is_error
-        self._telemetry_badge = telemetry_badge or ""
-        self._thinking_timer: Timer | None = None
-        self.thinking = thinking
-        if is_error:
-            self.add_class("error")
-
-    def compose(self) -> ComposeResult:
-        yield Label("", classes="message-label")
-        yield Static("", classes="message-content")
-        yield Label("", classes="message-telemetry")
-        with Horizontal(classes="message-toolbar"):
-            yield Button("📋 Copy", classes="copy-btn copy-full-btn")
-            yield Button("</> Code", classes="copy-btn copy-code-btn")
-            yield Label("", classes="copy-status")
-
-    def on_mount(self) -> None:
-        self._thinking_timer = self.set_interval(0.35, self._advance_thinking, pause=not self.thinking)
-        self._render_content()
-
-    def _advance_thinking(self) -> None:
-        self.dots = (self.dots + 1) % 4
-
-    def watch_thinking(self, thinking: bool) -> None:
-        if self._thinking_timer is not None:
-            if thinking:
-                self._thinking_timer.resume()
-            else:
-                self._thinking_timer.pause()
-        self._render_content()
-
-    def watch_dots(self, dots: int) -> None:
-        if self.thinking:
-            self._render_content()
-
-    def _render_content(self) -> None:
-        if not self.is_mounted:
-            return
-        label = self.query_one(".message-label", Label)
-        body = self.query_one(".message-content", Static)
-        telemetry = self.query_one(".message-telemetry", Label)
-        toolbar = self.query_one(".message-toolbar", Horizontal)
-        copy_status = self.query_one(".copy-status", Label)
-
-        if self.thinking:
-            suffix = "." * (self.dots % 4)
-            label.update(f"AxiomLM{suffix}")
-            body.update("")
-            telemetry.update("")
-            telemetry.remove_class("visible")
-            toolbar.remove_class("visible")
-            copy_status.update("")
-            return
-
-        if self._is_error:
-            label.update("AxiomLM Error")
-            body.update(self._content)
-            telemetry.update("")
-            telemetry.remove_class("visible")
-            toolbar.remove_class("visible")
-            copy_status.update("")
-            return
-
-        label.update("AxiomLM")
-        body.update(RichMarkdown(self._content))
-        toolbar.add_class("visible")
-        if self._telemetry_badge:
-            telemetry.update(self._telemetry_badge)
-            telemetry.add_class("visible")
-        else:
-            telemetry.update("")
-            telemetry.remove_class("visible")
-
-    def stream_token(self, token: str) -> None:
-        if self._is_error:
-            self._is_error = False
-            self.remove_class("error")
-        if self.thinking:
-            self.thinking = False
-        self._content += token
-        self._render_content()
-
-    def finalize(self, content: str, is_error: bool = False, telemetry_badge: str | None = None) -> None:
-        self._is_error = is_error
-        if is_error:
-            self.add_class("error")
-        else:
-            self.remove_class("error")
-        self._telemetry_badge = "" if is_error else (telemetry_badge or "")
-        self._content = content
-        self.thinking = False
-        self._render_content()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.has_class("copy-full-btn"):
-            success, message = copy_to_clipboard(self._content)
-            self._show_copy_status(success, message)
-            event.stop()
-            return
-        if event.button.has_class("copy-code-btn"):
-            code = extract_code_blocks(self._content)
-            if not code:
-                self._show_copy_status(False, "No fenced code blocks found.")
-            else:
-                success, message = copy_to_clipboard(code)
-                self._show_copy_status(success, message)
-            event.stop()
-
-    def copy_full(self) -> tuple[bool, str]:
-        return copy_to_clipboard(self._content)
-
-    def copy_code_only(self) -> tuple[bool, str]:
-        code = extract_code_blocks(self._content)
-        if not code:
-            return False, "No fenced code blocks found."
-        return copy_to_clipboard(code)
-
-    def _show_copy_status(self, success: bool, message: str) -> None:
-        if not self.is_mounted:
-            return
-        status = self.query_one(".copy-status", Label)
-        if success:
-            status.styles.color = "ansi_green"
-            status.styles.text_style = "bold"
-            status.update(f"✓ {message}")
-        else:
-            status.styles.color = "ansi_red"
-            status.styles.text_style = "bold"
-            status.update(f"✗ {message}")
-        self.set_timer(3.0, lambda: self._clear_copy_status())
-
-    def _clear_copy_status(self) -> None:
-        if not self.is_mounted:
-            return
-        status = self.query_one(".copy-status", Label)
-        status.styles.color = "ansi_bright_black"
-        status.styles.text_style = "dim"
-        status.update("")
-
-
-class BookListRow(Static):
-    """Single sidebar row with title/count and a compact delete button."""
-
-    DEFAULT_CSS = """
-    BookListRow {
-        layout: horizontal;
-        width: 100%;
-        height: 1;
-        min-height: 1;
-        align: left middle;
-        background: transparent;
-    }
-
-    BookListRow .book-label {
-        width: 1fr;
-        height: 1;
-        margin: 0;
-        padding: 0;
-        color: ansi_bright_white;
-        background: transparent;
-        content-align: left middle;
-    }
-
-    BookListRow .book-delete-btn {
-        width: 5;
-        min-width: 5;
-        height: 1;
-        min-height: 1;
-        margin: 0 0 0 1;
-        padding: 0 1;
-        border: round ansi_red;
-        background: transparent;
-        color: ansi_red;
-        text-style: bold;
-        content-align: center middle;
-    }
-
-    BookListRow .book-delete-btn:hover {
-        background: ansi_red 15%;
-        color: ansi_bright_white;
-    }
-    """
-
-    def __init__(self, book_stem: str) -> None:
-        super().__init__()
-        self.book_stem = book_stem
-        self.book_label = Label("", classes="book-label")
-
-    def compose(self) -> ComposeResult:
-        yield self.book_label
-        yield Button(
-            "🗑️",
-            classes="book-delete-btn",
-            tooltip=f"Delete {self.book_stem}",
-            compact=True,
-            variant="error",
-        )
-
-
-class DeleteCollectionConfirm(ModalScreen[bool]):
-    """Confirm irreversible collection deletion."""
-
-    DEFAULT_CSS = """
-    DeleteCollectionConfirm {
-        align: center middle;
-    }
-
-    #delete_dialog {
-        width: 68;
-        max-width: 90%;
-        height: auto;
-        border: round ansi_red;
-        background: ansi_black;
-        padding: 1 2;
-    }
-
-    .delete-dialog-title {
-        color: ansi_red;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    .delete-dialog-body {
-        color: ansi_white;
-    }
-
-    .delete-dialog-warning {
-        color: ansi_yellow;
-        text-style: bold;
-    }
-
-    #delete_dialog_actions {
-        margin-top: 1;
-        height: auto;
-        align: right middle;
-    }
-
-    #delete_dialog_actions Button {
-        width: auto;
-        min-width: 12;
-        margin-left: 1;
-    }
-    """
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel", show=False),
-    ]
-
-    def __init__(self, book_name: str, chunk_count: int, estimated_size_mb: float) -> None:
-        super().__init__()
-        self.book_name = book_name
-        self.chunk_count = chunk_count
-        self.estimated_size_mb = estimated_size_mb
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="delete_dialog"):
-            yield Label("Delete Collection", classes="delete-dialog-title")
-            yield Static(
-                f"Are you sure you want to delete '{self.book_name}'?",
-                classes="delete-dialog-body",
-            )
-            yield Static("", classes="delete-dialog-body")
-            yield Static("This will permanently erase:", classes="delete-dialog-warning")
-            yield Static(
-                f"• {self.chunk_count} indexed chunks\n"
-                "• All vector embeddings and metadata\n"
-                f"• ~{self.estimated_size_mb:.1f} MB of local storage",
-                classes="delete-dialog-body",
-            )
-            yield Static("", classes="delete-dialog-body")
-            yield Static("This action cannot be undone.", classes="delete-dialog-warning")
-            with Horizontal(id="delete_dialog_actions"):
-                yield Button("Cancel", id="delete_cancel_btn")
-                yield Button("Delete", id="delete_confirm_btn", variant="error")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "delete_confirm_btn":
-            self.dismiss(True)
-            return
-        self.dismiss(False)
-
-    def action_cancel(self) -> None:
-        self.dismiss(False)
-
-
-class TuningPanel(Static):
-    """Compact, live retrieval controls shown under the query input."""
-
-    class TopkChanged(Message):
-        def __init__(self, value: int) -> None:
-            super().__init__()
-            self.value = value
-
-    class DistanceChanged(Message):
-        def __init__(self, value: float) -> None:
-            super().__init__()
-            self.value = value
-
-    TOP_K_MIN = 3
-    TOP_K_MAX = 20
-    DIST_MIN = 0.0
-    DIST_MAX = 1.0
-    DIST_STEP = 0.05
-
-    def __init__(self, top_k: int, distance: float) -> None:
-        super().__init__(id="query_tuning")
-        self._top_k = self._clamp_top_k(top_k)
-        self._distance = self._clamp_distance(distance)
-
-    def compose(self) -> ComposeResult:
-        with Horizontal(classes="tuning-row"):
-            yield Label("K", classes="tuning-key")
-            yield Button("-", id="topk_dec_btn", classes="tune-btn", compact=True)
-            yield Label("", id="topk_value", classes="tuning-value")
-            yield Button("+", id="topk_inc_btn", classes="tune-btn", compact=True)
-            yield Label("", classes="tuning-gap")
-            yield Label("D", classes="tuning-key")
-            yield Button("-", id="dist_dec_btn", classes="tune-btn", compact=True)
-            yield Label("", id="dist_value", classes="tuning-value")
-            yield Button("+", id="dist_inc_btn", classes="tune-btn", compact=True)
-
-    def on_mount(self) -> None:
-        self._refresh_labels()
-
-    def set_values(self, top_k: int, distance: float) -> None:
-        self._top_k = self._clamp_top_k(top_k)
-        self._distance = self._clamp_distance(distance)
-        self._refresh_labels()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-        if button_id == "topk_dec_btn":
-            self._top_k = self._clamp_top_k(self._top_k - 1)
-            self._refresh_labels()
-            self.post_message(self.TopkChanged(self._top_k))
-            event.stop()
-            return
-        if button_id == "topk_inc_btn":
-            self._top_k = self._clamp_top_k(self._top_k + 1)
-            self._refresh_labels()
-            self.post_message(self.TopkChanged(self._top_k))
-            event.stop()
-            return
-        if button_id == "dist_dec_btn":
-            self._distance = self._clamp_distance(self._distance - self.DIST_STEP)
-            self._refresh_labels()
-            self.post_message(self.DistanceChanged(self._distance))
-            event.stop()
-            return
-        if button_id == "dist_inc_btn":
-            self._distance = self._clamp_distance(self._distance + self.DIST_STEP)
-            self._refresh_labels()
-            self.post_message(self.DistanceChanged(self._distance))
-            event.stop()
-
-    def _refresh_labels(self) -> None:
-        if not self.is_mounted:
-            return
-        self.query_one("#topk_value", Label).update(f"{self._top_k}")
-        self.query_one("#dist_value", Label).update(f"{self._distance:.2f}")
-
-    @classmethod
-    def _clamp_top_k(cls, value: int) -> int:
-        return max(cls.TOP_K_MIN, min(cls.TOP_K_MAX, int(value)))
-
-    @classmethod
-    def _clamp_distance(cls, value: float) -> float:
-        rounded = round(float(value), 2)
-        return max(cls.DIST_MIN, min(cls.DIST_MAX, rounded))
-
-
 class AxiomLMApp(App):
-    """AxiomLM terminal UI with sidebar, chat widgets, and Qwen integration."""
+    """One study surface; workers own local inference and ingestion."""
+
+    TITLE = "AxiomLM"
+    CSS_PATH = config.UI_STYLESHEET_PATH
+    COMMANDS: ClassVar = {AxiomCommandProvider}
+    ENABLE_COMMAND_PALETTE = False
     top_k_results = reactive(TOP_K_RESULTS)
     distance_threshold = reactive(DISTANCE_THRESHOLD)
-
-    CSS = """
-    Screen {
-        layout: vertical;
-        /* Force true transparent background to match terminal theme completely */
-        background: transparent; 
-    }
-
-    #main_container {
-        layout: horizontal;
-        height: 1fr;
-    }
-
-    /* ── Sidebar ───────────────────────────────────────────────────────── */
-    #sidebar {
-        width: 25%;
-        min-width: 58;
-        border-right: solid ansi_bright_black;
-        background: transparent;
-        padding-top: 1;
-        overflow-y: auto;
-        scrollbar-size: 1 1;
-    }
-
-    #brand {
-        padding: 0 1;
-        layout: vertical;
-        height: auto;
-        margin-bottom: 0;
-    }
-
-    #headline {
-        layout: horizontal;
-        align: left middle;
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    #mascot_art {
-        width: auto;
-        height: auto;
-        background: transparent;
-    }
-
-    #brand_title {
-        text-style: bold;
-        color: ansi_cyan;
-        width: auto;
-        margin-left: 1;
-        content-align: center middle;
-    }
-
-    #brand_subtitle {
-        color: ansi_bright_black;
-        text-style: italic;
-        width: 100%;
-        text-align: left;
-        margin-bottom: 1;
-    }
-
-    .status_label {
-        padding: 0 1;
-        color: ansi_bright_white;
-        text-style: bold;
-    }
-
-
-    #empty_state {
-        padding: 1 2;
-        color: ansi_bright_black;
-    }
-
-    .hidden {
-        display: none;
-    }
-
-    ListView {
-        height: 1fr;
-        margin: 0 1 1 1;
-        border: none;
-        background: transparent;
-        scrollbar-size: 1 1;
-    }
-
-    ListItem {
-        padding: 0 1;
-        background: transparent;
-    }
-
-    ListItem > Label {
-        color: ansi_bright_white;
-        background: transparent;
-    }
-
-    ListItem.-highlight {
-        background: transparent;
-    }
-    
-    ListItem.-highlight > Label {
-        color: ansi_bright_cyan;
-        text-style: bold;
-        background: transparent;
-    }
-
-    ListItem.-highlight .book-label {
-        color: ansi_bright_cyan;
-        text-style: bold;
-    }
-
-    ListItem.-highlight .book-delete-btn {
-        color: ansi_red;
-    }
-
-    /* ── Inputs and Selects (Minimalist styling) ───────────────────────── */
-    Select, Input, Button {
-        border: solid ansi_bright_black;
-        background: transparent;
-        color: ansi_white;
-        margin: 0 1 1 1;
-    }
-
-    Select:focus, Input:focus, Button:focus {
-        border: solid ansi_cyan;
-    }
-    
-    Button:hover {
-        background: ansi_bright_black;
-    }
-
-    /* Removing internal backgrounds for Select widget components */
-    Select > SelectCurrent {
-        background: transparent;
-        border: none;
-        color: ansi_white;
-    }
-    SelectOverlay {
-        background: ansi_black;
-        border: solid ansi_bright_black;
-    }
-    SelectOverlay > OptionList {
-        background: transparent;
-    }
-    OptionList > .option-list--option {
-        background: transparent;
-        color: ansi_white;
-    }
-    OptionList > .option-list--option-highlighted {
-        background: ansi_bright_black;
-        color: ansi_cyan;
-    }
-
-    /* ── Chat panel ────────────────────────────────────────────────────── */
-    #chat_panel {
-        width: 1fr;
-        min-width: 0;
-        layout: vertical;
-        background: transparent;
-        padding-right: 1;
-    }
-
-    #chat_scroll {
-        height: 1fr;
-        padding: 1 2 0 2;
-        scrollbar-size: 1 1;
-        scrollbar-color: ansi_cyan 35%;
-        scrollbar-color-hover: ansi_cyan;
-        scrollbar-color-active: ansi_bright_cyan;
-    }
-
-    #query_input {
-        margin: 1 2 0 2;
-        height: 3;
-        max-height: 8;
-        border: round ansi_bright_black;
-        background: ansi_black 5%;
-        padding: 0 1;
-    }
-
-    #query_input:focus {
-        border: round ansi_cyan;
-    }
-
-    #query_tuning {
-        margin: 0 2 1 2;
-        border: none;
-        background: transparent;
-        height: 1;
-        min-height: 1;
-        padding: 0;
-    }
-
-    #query_tuning .tuning-title {
-        color: ansi_bright_black;
-        text-style: bold;
-        width: 6;
-    }
-
-    #query_tuning .tuning-row {
-        layout: horizontal;
-        align: left middle;
-        height: 1;
-        margin: 0;
-    }
-
-    #query_tuning .tuning-key {
-        width: 2;
-        color: ansi_bright_white;
-        content-align: center middle;
-    }
-
-    #query_tuning .tuning-gap {
-        width: 2;
-        min-width: 2;
-    }
-
-    #query_tuning .tuning-value {
-        width: 6;
-        min-width: 6;
-        color: ansi_cyan;
-        text-style: bold;
-        content-align: center middle;
-    }
-
-    #query_tuning .tune-btn {
-        width: 3;
-        min-width: 3;
-        height: 1;
-        min-height: 1;
-        margin: 0;
-        padding: 0;
-        border: none;
-        background: transparent;
-        color: ansi_bright_black;
-        content-align: center middle;
-        text-style: bold;
-    }
-
-    #query_tuning .tune-btn:hover {
-        color: ansi_cyan;
-        text-style: bold;
-        background: transparent;
-    }
-
-    #query_tuning .tune-btn:focus {
-        border: none;
-        background: transparent;
-        color: ansi_cyan;
-        text-style: bold;
-    }
-
-    #query_tuning Button {
-        margin: 0;
-        border: none;
-        background: transparent;
-        padding: 0;
-    }
-
-    #query_tuning Button:hover {
-        background: transparent;
-    }
-
-    #query_tuning Button:focus {
-        border: none;
-        background: transparent;
-    }
-
-    /* ── Utilities ─────────────────────────────────────────────────────── */
-    #parse_status_card {
-        margin: 0 1 1 1;
-        padding: 0 1;
-        border: round ansi_bright_black;
-        background: transparent;
-        height: auto;
-    }
-
-    #parse_status_title {
-        color: ansi_cyan;
-        text-style: bold;
-    }
-
-    #parse_status_stage {
-        color: ansi_bright_white;
-    }
-
-    #parse_status_engine {
-        color: ansi_bright_white;
-    }
-
-    #parse_status_eta {
-        color: ansi_bright_black;
-    }
-
-    #parse_status_detail {
-        color: ansi_bright_black;
-        text-style: italic;
-    }
-
-    #parse_progress {
-        margin: 0 1 1 1;
-        background: transparent;
-    }
-    ProgressBar > .bar--bar {
-        color: ansi_bright_black;
-        background: transparent;
-    }
-    ProgressBar > .bar--complete {
-        color: ansi_cyan;
-    }
-    """
-
-    BINDINGS = [
-        Binding("ctrl+q", "quit", "Quit", show=True),
-        Binding("ctrl+l", "clear_chat", "Clear", show=True),
-        Binding("ctrl+c", "copy_focused_message", "Copy", show=True),
-        Binding("ctrl+d", "delete_selected_book", "Delete Book", show=True),
-        Binding("tab", "toggle_focus", "Focus", show=True),
-        Binding("escape", "cancel_query", "Cancel", show=True),
+    BINDINGS: ClassVar = [
+        Binding("ctrl+p", "commands", show=False, priority=True),
+        Binding("tab", "complete_prompt", show=False, priority=True),
+        Binding("escape", "escape", show=False, priority=True),
+        Binding("ctrl+c", "interrupt", show=False, priority=True),
+        Binding("ctrl+l", "clear_chat", show=False, priority=True),
+        Binding("pageup", "page_up", show=False, priority=True),
+        Binding("pagedown", "page_down", show=False, priority=True),
+        Binding("end", "follow", show=False, priority=True),
     ]
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.active_collection_name: str | None = None
-        self.selected_model: str = OLLAMA_MODEL
-        self._book_labels: dict[str, Label] = {}
-        self._book_counts: dict[str, int] = {}
-        self._pending_assistants: dict[str, AssistantMessage] = {}
-        self._is_parsing = False
-        self._parse_progress_timer: Timer | None = None
-        self._parse_started_at: float | None = None
-        self._parse_target_progress: float = 0.0
-        self._parse_current_stage: str = "Idle"
-        self._parse_current_engine: str = "-"
-        self._parse_detail: str = ""
-        self._active_query_worker: Worker | None = None
-        self._active_query_request_id: str | None = None
-        self._cancelled_query_ids: set[str] = set()
-        self._query_input_min_height = 3
-        self._query_input_max_height = 8
-        self._use_gpu_for_embeddings = True
+    def __init__(self):
+        super().__init__(
+            driver_class=PaletteDriver if sys.platform == "linux" else None
+        )
+        self.active_collection_name = None
+        self.selected_model = OLLAMA_MODEL
+        self._book_counts = {}
+        self._models = []
+        self._conversation = []
+        self._last_retrieved_pages = []
+        self._request_books = {}
+        self._request_context = {}
+        self._transport_closed = {}
+        self._answer_streams = {}
+        self._answer_flush_lock = asyncio.Lock()
+        self._last_answer_flush = float("-inf")
+        self._answer_flush_worker = None
+        self._pending_assistants = {}
+        self._active_query_worker = None
+        self._active_query_request_id = None
+        self._cancelled_query_ids = set()
+        self._query_workload_token = None
+        self._parse_workload_token = None
         self._workload_coordinator = WorkloadCoordinator()
-        self._query_workload_token: str | None = None
-        self._parse_workload_token: str | None = None
-        self._active_processes: set[subprocess.Popen[str]] = set()
+        self._is_parsing = False
+        self._use_gpu_for_embeddings = True
+        self._active_processes = set()
         self._process_lock = Lock()
         self._process_shutdown_started = False
+        self._parse_started_at = None
+        self._parse_current_stage = "Idle"
+        self._parse_current_engine = ""
+        self._parse_detail = ""
+        self._ingest_cancelled = False
+        self._ingest_view = None
+        self._ingest_path = ""
+        self.queued_query = None
+        self.turns = []
+        self.notices = []
+        self._home_visible = True
+        self._status = "○ checking…"
+        self._terminal_focused = True
+        self._focus_reports_seen = False
+        self.motion = MotionClock(self)
+        self._copy_confirmation = None
+        self._copy_expiry = 0
+        self._completion_flash_until = 0
+        self._completion_view = None
+        self._completion_text = ""
+        self._ingest_stage = "preparing"
+        self._ingest_counts = {}
+        self._ingest_completed = set()
+        self._progress_shown = 0
+        self._progress_updated = 0
+        self._ingest_count_started = time.monotonic()
+        self._pending_remove = None
+        self._unavailable_books = {}
+        self._deleting = False
+        self._last_interrupt = 0.0
+        self.overlay = None
+        self._preview = None
+        self._warned_truecolor = False
+        self._warned_ansi_fallback = False
+        self._overlay_suppressed = False
+        self._last_question = ""
+        self.settings_path = config.UI_CONFIG_PATH
+        self.settings, self._settings_errors = load_settings(
+            self.settings_path, os.environ
+        )
+        self.custom_themes, errors = load_custom_themes(config.UI_THEMES_DIR)
+        self._settings_errors.extend(errors)
+        if any(error.startswith("✗") for error in errors):
+            self.settings.theme = "terminal"
 
-        # Conversation memory
-        self._conversation: list[dict[str, str]] = []
-        self._last_retrieved_pages: list[int] = []
-        self._request_books: dict[str, str] = {}
+    def get_default_screen(self):
+        return StudyScreen(id="_default")
+
+    async def on_load(self):
+        self.set_class(self._home_visible, "home")
+        await resolve_theme(self, self.settings, os.environ)
+
+    async def _on_compose(self, event):
+        event.prevent_default()
+        await resolve_theme(self, self.settings, os.environ)
+        await super()._on_compose()
 
     def compose(self) -> ComposeResult:
-        yield Header()
-
-        with Horizontal(id="main_container"):
-            with Vertical(id="sidebar"):
-                with Vertical(id="brand"):
-                    with Horizontal(id="headline"):
-                        yield Static(id="mascot_art")
-                        yield Label("AxiomLM", id="brand_title")
-                    yield Label("Your textbooks. Locally. Answered.", id="brand_subtitle")
-                
-                yield Label("Ollama Model", classes="status_label")
-                yield Select([("Loading models...", "__loading__")], id="model_select", value="__loading__")
-                yield Button("Refresh Models", id="refresh_models_btn")
-                
-                yield Label("Parse PDF", classes="status_label")
-                yield Input(placeholder="/path/to/book.pdf", id="pdf_path_input")
-                yield Select(
-                    [
-                        ("Auto (detect best engine)", "auto"),
-                        ("pymupdf4llm — Fast, no GPU (clean PDFs)", "pymupdf4llm"),
-                        ("MinerU — Scanned / complex PDFs", "mineru"),
-                        ("Marker — High quality (8GB VRAM)", "marker"),
-                    ],
-                    id="ocr_mode_select",
-                    value="auto",
+        yield Static("resize terminal", id="resize_warning", markup=False)
+        with Vertical(id="surface"):
+            yield Static("", id="header", markup=False)
+            with StudyStream(id="chat_scroll"), Vertical(id="home"):
+                yield Static(LOGO, id="logo", markup=False)
+                yield Static(
+                    "Your textbooks. Locally. Answered.", id="tagline", markup=False
                 )
-                yield Button("Parse + Index", id="parse_pdf_btn")
-                with Vertical(id="parse_status_card", classes="hidden"):
-                    yield Label("Parse / Index Status", id="parse_status_title")
-                    yield Label("Stage: Idle", id="parse_status_stage")
-                    yield Label("Engine: -", id="parse_status_engine")
-                    yield Label("ETA: --:--", id="parse_status_eta")
-                    yield Label("", id="parse_status_detail")
-                yield ProgressBar(total=100, show_percentage=True, show_eta=False, id="parse_progress", classes="hidden")
-                
-                yield Label("Loaded Books", classes="status_label")
-                yield Label("No books indexed.", id="empty_state", classes="hidden")
-                yield ListView(id="book_list")
-
-            with Vertical(id="chat_panel"):
-                yield ScrollableContainer(id="chat_scroll")
+            yield Static("", id="new_output", markup=False)
+            yield Static("", id="rule", markup=False)
+            with Horizontal(id="prompt_row"):
+                yield Static("›", id="prompt_glyph", markup=False)
                 yield QueryComposer(
                     id="query_input",
                     compact=True,
                     highlight_cursor_line=False,
-                    placeholder="Ask a question (Enter to send, Shift+Enter for newline)...",
+                    placeholder="Ask about a book, or type / for commands",
                 )
-                yield TuningPanel(TOP_K_RESULTS, DISTANCE_THRESHOLD)
+                yield Static("", id="ghost", markup=False)
+            yield Static(
+                "○ no book loaded · /parse <path>", id="condition", markup=False
+            )
+            yield Static("", id="hint", markup=False)
 
-        yield Footer()
-
-    async def on_mount(self) -> None:
-        await self._populate_sidebar()
-        self._set_header()
-        self.query_one("#query_input", QueryComposer).focus()
-        self._resize_query_input()
-        
-        self._render_mascot()
-        self._refresh_models()
-        self._sync_tuning_panel()
-
-    def on_unmount(self) -> None:
-        request_id = self._active_query_request_id
-        if request_id:
-            self._cancelled_query_ids.add(request_id)
-        self._terminate_active_processes()
-
-    def watch_top_k_results(self, value: int) -> None:
-        self._sync_tuning_panel()
-
-    def watch_distance_threshold(self, value: float) -> None:
-        self._sync_tuning_panel()
-
-    def on_tuning_panel_topk_changed(self, message: TuningPanel.TopkChanged) -> None:
-        self._apply_top_k_change(message.value)
-
-    def _apply_top_k_change(self, value: int) -> None:
-        self.top_k_results = max(TuningPanel.TOP_K_MIN, min(TuningPanel.TOP_K_MAX, int(value)))
-
-    def on_tuning_panel_distance_changed(self, message: TuningPanel.DistanceChanged) -> None:
-        self.distance_threshold = max(
-            TuningPanel.DIST_MIN,
-            min(TuningPanel.DIST_MAX, round(float(message.value), 2)),
+    def on_mount(self):
+        self.query_one(QueryComposer).focus()
+        self._layout_changed()
+        self.run_worker(
+            self._run_startup_checks(), group="startup", exit_on_error=False
         )
 
-    def _sync_tuning_panel(self) -> None:
+    async def _run_startup_checks(self):
+        async def books():
+            try:
+                discovered = await asyncio.to_thread(self._discover_books)
+                self._book_counts = discovered
+                if self.active_collection_name is None and discovered:
+                    self.active_collection_name = next(iter(discovered))
+                for book, error in self._unavailable_books.items():
+                    await self.write_line(
+                        f"✗ {book}: incomplete or unavailable index ({error}) · /remove {shlex.quote(book)} or /parse <path>"
+                    )
+                self._refresh_condition()
+                self._set_header()
+            except Exception as exc:  # noqa: BLE001
+                await self.write_line(f"✗ book discovery failed: {exc} · /books")
+
+        async def models():
+            try:
+                self._models = await asyncio.to_thread(self._fetch_ollama_models)
+                if not self.selected_model:
+                    await self.write_line("○ no model · /model <name>")
+                elif self.selected_model not in self._models:
+                    await self.write_line(
+                        f"✗ model {self.selected_model} not found · /models"
+                    )
+                self._status = "● ready"
+            except Exception:  # noqa: BLE001
+                self._status = "○ offline"
+                await self.write_line(
+                    "✗ can't reach Ollama at localhost:11434 · start it, then /retry"
+                )
+            self._set_header()
+            self._refresh_condition()
+
+        await self._theme_notice(self.settings.theme)
+        for error in self._settings_errors:
+            await self.write_line(error)
+        await asyncio.gather(books(), models())
+
+    def _discover_books(self):
+        result, unavailable = {}, {}
+        for book in sorted(list_collections()):
+            try:
+                collection = get_collection(book)
+                ensure_collection_ready(collection)
+                result[book] = collection.count()
+            except Exception as exc:  # noqa: BLE001
+                unavailable[book] = str(exc).splitlines()[0] or type(exc).__name__
+        self._unavailable_books = unavailable
+        return result
+
+    def _refresh_condition(self):
+        condition = self.query_one("#condition", Static)
+        condition.display = self._home_visible
+        if self.active_collection_name:
+            condition.update(
+                self._status
+                + " · "
+                + self._format_book_name(self.active_collection_name)
+            )
+        else:
+            condition.update("○ no book loaded · /parse <path>")
+
+    def _set_header(self):
         if not self.is_mounted:
             return
-        panel = self.query_one("#query_tuning", TuningPanel)
-        panel.set_values(self.top_k_results, self.distance_threshold)
+        width = self.size.width
+        if width < 60:
+            left, right = "AXIOM", self._status.split()[0]
+        else:
+            book = self.active_collection_name
+            left = "AxiomLM" + (
+                f" · {self._format_book_name(book)} ({self._book_counts.get(book, 0)})"
+                if book
+                else ""
+            )
+            if width >= 100 and self.selected_model:
+                left += " · " + self.selected_model
+            right = self._status
+        text = Text(left, style="bold" if width < 60 else "")
+        right_text = Text(right)
+        available = max(0, width - 4 - right_text.cell_len - 1)
+        text.truncate(available, overflow="ellipsis")
+        text.append(" " * max(1, width - 4 - text.cell_len - right_text.cell_len))
+        text.append_text(right_text)
+        self.query_one("#header", Static).update(text)
 
-    async def _populate_sidebar(self) -> None:
-        book_list = self.query_one("#book_list", ListView)
-        await book_list.clear()
-        self._book_labels.clear()
-        self._book_counts.clear()
-
-        try:
-            collections = sorted(list_collections())
-        except Exception:
-            collections = []
-
-        if not collections:
-            self.active_collection_name = None
-            self._toggle_empty_state(has_books=False)
-            return
-
-        for stem in collections:
-            try:
-                count = get_collection(stem).count()
-            except Exception:
-                count = 0
-            self._book_counts[stem] = count
-            row = BookListRow(stem)
-            self._book_labels[stem] = row.book_label
-            book_list.append(ListItem(row, id=stem))
-
-        self.active_collection_name = collections[0]
-        book_list.index = 0
-        self._toggle_empty_state(has_books=True)
-        self._refresh_book_labels()
-
-    def _format_book_name(self, stem: str) -> str:
+    def _format_book_name(self, stem):
         return stem.replace("_", " ").title()
 
-    def _refresh_book_labels(self) -> None:
-        for stem, label in self._book_labels.items():
-            prefix = "📖 " if stem == self.active_collection_name else "   "
-            title = self._format_book_name(stem)
-            count = self._book_counts.get(stem, 0)
-            label.update(f"{prefix}{title} ({count})")
+    def on_resize(self, event):
+        if self.is_mounted:
+            self._layout_changed(event.size)
 
-    def _toggle_empty_state(self, has_books: bool) -> None:
-        empty_state = self.query_one("#empty_state", Label)
-        book_list = self.query_one("#book_list", ListView)
-        if has_books:
-            empty_state.add_class("hidden")
-            book_list.remove_class("hidden")
+    def _layout_changed(self, size=None):
+        size = size or self.size
+        tiny = size.width < 40 or size.height < 12
+        self.query_one("#resize_warning").display = tiny
+        self.query_one("#surface").display = not tiny
+        self.query_one("#logo", Static).update("AXIOM" if size.width < 60 else LOGO)
+        self.query_one("#tagline").display = size.height >= 24
+        self.query_one("#home").display = self._home_visible
+        self.query_one("#header").display = not self._home_visible
+        self.query_one("#rule", Static).update("─" * max(0, size.width - 4))
+        self._set_header()
+        self._update_hint()
+
+    def _hide_home(self):
+        self._home_visible = False
+        self.remove_class("home")
+        self.query_one("#home").display = False
+        self.query_one("#header").display = True
+        self.query_one("#query_input", QueryComposer).placeholder = ""
+        self._refresh_condition()
+
+    def _busy(self):
+        return (
+            self._workload_coordinator.active_kind is not None
+            or self._deleting
+            or self.queued_query is not None
+        )
+
+    async def write_line(self, text):
+        self.notices.append(text)
+        self.notices = self.notices[-config.UI_SCROLLBACK_BLOCKS :]
+        stream = self.query_one(StudyStream)
+        await stream.mount(
+            Static(
+                text,
+                classes="notice failed" if text.startswith("✗") else "notice tool-line",
+                markup=False,
+            ),
+            before=stream.spacer,
+        )
+        await stream.trim_history()
+
+    def on_study_stream_trimmed(self, _event):
+        self.turns[:] = [view for view in self.turns if view.is_attached]
+
+    async def on_study_screen_selection_changed(self, _event):
+        for view in self.turns:
+            if view.is_attached:
+                await view.apply_pending_format()
+
+    def _update_hint(self):
+        if not self.is_mounted:
+            return
+        if self.overlay:
+            hint = (
+                "↑↓ preview   enter keep   esc revert"
+                if self.overlay.kind == "themes"
+                else "↑↓ move   tab fill   enter run   esc close"
+            )
+        elif self._busy():
+            hint = "esc cancel"
         else:
-            empty_state.remove_class("hidden")
-            book_list.add_class("hidden")
+            hint = "enter send   shift+enter newline   / commands"
+        self.query_one("#hint", Static).update(hint)
 
-    def _set_header(self) -> None:
-        self.title = "AxiomLM"
-        model_name = self.selected_model or OLLAMA_MODEL
-        if self.active_collection_name:
-            book = self._format_book_name(self.active_collection_name)
-            self.sub_title = f"Active context: {book} · Engine: {model_name}"
-        else:
-            self.sub_title = f"No book selected · Engine: {model_name}"
-
-    def action_toggle_focus(self) -> None:
-        input_widget = self.query_one("#query_input", QueryComposer)
-        book_list = self.query_one("#book_list", ListView)
-        if self.focused is input_widget:
-            book_list.focus()
-        else:
-            input_widget.focus()
-
-    def _resize_query_input(self) -> None:
-        composer = self.query_one("#query_input", QueryComposer)
-        line_breaks = composer.text.count("\n")
-        target = min(self._query_input_max_height, self._query_input_min_height + line_breaks)
-        if composer.styles.height != target:
-            composer.styles.height = target
-
-    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+    def on_text_area_changed(self, event):
         if event.control.id != "query_input":
             return
-        self._resize_query_input()
-
-    def action_cancel_query(self) -> None:
-        worker = self._active_query_worker
-        request_id = self._active_query_request_id
-        if worker is None or not worker.is_running or request_id is None:
-            self.notify("No query is currently running.", severity="information")
+        text = event.control.text
+        name = text.split(" ", 1)[0]
+        spec = COMMANDS.get(name)
+        self.query_one("#ghost", Static).update(
+            spec.usage.split(" ", 1)[0] if spec and " " not in text else ""
+        )
+        if self._overlay_suppressed:
+            self._overlay_suppressed = False
             return
+        if text.startswith("/") and " " not in text and "\n" not in text:
+            self.run_worker(
+                self._show_overlay([n for n in COMMANDS if n.startswith(text)]),
+                group="completion",
+                exclusive=True,
+                exit_on_error=False,
+            )
+        elif self.overlay and self.overlay.kind == "commands":
+            self.run_worker(
+                self.close_overlay(),
+                group="completion",
+                exclusive=True,
+                exit_on_error=False,
+            )
 
-        self._cancelled_query_ids.add(request_id)
-        worker.cancel()
-        self.notify("Cancelling query...", severity="warning")
+    async def _show_overlay(self, names, kind="commands"):
+        if self.overlay:
+            if self.overlay.kind == "themes" and self._preview:
+                await self._preview.revert()
+                self._preview = None
+            await self.overlay.remove()
+        labels = {}
+        if kind == "themes" and os.environ.get("COLORTERM") not in {
+            "truecolor",
+            "24bit",
+        }:
+            for name in names:
+                spec = (THEMES | self.custom_themes).get(name)
+                if spec and any(
+                    value.startswith("#")
+                    for value in vars(spec).values()
+                    if isinstance(value, str)
+                ):
+                    labels[name] = name + " · needs truecolor"
+        self.overlay = CommandOverlay(names, kind=kind, labels=labels)
+        await self.query_one("#surface").mount(self.overlay)
+        self._update_hint()
 
-    async def action_clear_chat(self) -> None:
-        chat_scroll = self.query_one("#chat_scroll", ScrollableContainer)
-        await chat_scroll.remove_children("*")
-        self._pending_assistants.clear()
-        self.conversation_history.clear()
-        self.last_chunks.clear()
+    async def action_commands(self):
+        await self._show_overlay(list(COMMANDS))
+        self.overlay.focus()
 
-    def action_copy_focused_message(self) -> None:
-        focused = self.focused
-        while focused is not None:
-            if isinstance(focused, AssistantMessage):
-                success, message = focused.copy_full()
-                focused._show_copy_status(success, message)
-                self.notify(message, severity="information" if success else "warning")
-                return
-            focused = getattr(focused, "parent", None)
-        self.notify("Focus an assistant response to copy it.", severity="information")
+    async def close_overlay(self, revert=True):
+        if self.overlay:
+            await self.overlay.remove()
+            self.overlay = None
+        if self._preview and revert:
+            await self._preview.revert()
+        self._preview = None
+        self.query_one(QueryComposer).focus()
+        self._update_hint()
 
-    async def _append_chat_widget(self, widget: Static, animate: bool = True) -> None:
-        chat_scroll = self.query_one("#chat_scroll", ScrollableContainer)
-        await chat_scroll.mount(widget)
-        chat_scroll.scroll_end(animate=animate)
+    def fill_command(self, command):
+        self._overlay_suppressed = True
+        prompt = self.query_one(QueryComposer)
+        prompt.load_text(
+            command + (" " if COMMANDS.get(command) and COMMANDS[command].usage else "")
+        )
+        prompt.move_cursor(prompt.document.end)
+        prompt.focus()
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        selected_book = event.item.id if event.item and event.item.id else None
-        if selected_book and selected_book != self.active_collection_name:
-            self.active_collection_name = selected_book
-            self._last_retrieved_pages.clear()
-            self._refresh_book_labels()
-            self._set_header()
-            self.query_one("#query_input", QueryComposer).focus()
+    def move_overlay(self, direction):
+        if self.overlay:
+            if direction < 0:
+                self.overlay.action_cursor_up()
+            else:
+                self.overlay.action_cursor_down()
 
-    async def on_query_composer_submitted(self, event: QueryComposer.Submitted) -> None:
-        if event.composer.id != "query_input":
+    async def action_complete_prompt(self):
+        await self.on_query_composer_completion_requested(None)
+
+    async def on_query_composer_completion_requested(self, _event):
+        if self.overlay and self.overlay.highlighted is not None:
+            name = self.overlay.get_option_at_index(self.overlay.highlighted).id
+            self.fill_command(name)
+            await self.close_overlay()
             return
+        prompt = self.query_one(QueryComposer)
+        if prompt.text.startswith("/parse "):
+            prefix = prompt.text[len("/parse ") :].strip().strip("\"'")
+            matches = await asyncio.to_thread(complete_pdf_path, prefix)
+            if matches:
+                self._overlay_suppressed = True
+                prompt.load_text("/parse " + shlex.quote(matches[0]))
+                prompt.move_cursor(prompt.document.end)
 
-        if self._active_query_worker is not None and self._active_query_worker.is_running:
-            self.notify("A query is already running. Press Esc to cancel it.", severity="warning")
+    async def _theme_notice(self, name):
+        if self.theme == "textual-ansi" and not self._warned_ansi_fallback:
+            self._warned_ansi_fallback = True
+            await self.write_line(
+                "○ terminal light/dark detection unavailable · using textual-ansi"
+            )
+        spec = (THEMES | self.custom_themes).get(name)
+        if (
+            spec
+            and any(
+                value.startswith("#")
+                for value in vars(spec).values()
+                if isinstance(value, str)
+            )
+            and os.environ.get("COLORTERM") not in {"truecolor", "24bit"}
+            and not self._warned_truecolor
+        ):
+            self._warned_truecolor = True
+            await self.write_line("○ truecolor unavailable · try /theme terminal")
+
+    async def on_option_list_option_highlighted(self, event):
+        if (
+            self.overlay is event.option_list
+            and self.overlay.kind == "themes"
+            and self._preview
+        ):
+            await self._preview.preview(event.option.id)
+            await self._theme_notice(event.option.id)
+
+    async def on_option_list_option_selected(self, event):
+        if self.overlay is not event.option_list:
             return
+        name, kind = event.option.id, self.overlay.kind
+        if kind == "themes":
+            try:
+                await self._preview.keep(name)
+            except (OSError, ValueError) as exc:
+                await self.write_line(
+                    f"✗ theme save failed: {exc} · previous theme restored"
+                )
+            await self.close_overlay(revert=False)
+        elif kind == "settings":
+            self.fill_command(name)
+            await self.close_overlay()
+        elif kind == "books":
+            await self.close_overlay()
+            await self.handle_command("/book", [name])
+        else:
+            await self.close_overlay()
+            await dispatch_command(self, name)
 
+    async def action_escape(self):
+        if self.overlay:
+            await self.close_overlay()
+        elif self._busy():
+            self.action_cancel_query()
+        else:
+            self.query_one(QueryComposer).clear()
+
+    async def action_interrupt(self):
+        if self.overlay or self._busy():
+            await self.action_escape()
+        elif time.monotonic() - self._last_interrupt <= config.UI_QUIT_CONFIRM_SECONDS:
+            await self.action_quit()
+        else:
+            self._last_interrupt = time.monotonic()
+            await self.write_line("○ press Ctrl+C again to quit")
+
+    def action_page_up(self):
+        self.query_one(StudyStream).scroll_page_up(animate=False)
+
+    def action_page_down(self):
+        self.query_one(StudyStream).scroll_page_down(animate=False)
+
+    def action_follow(self):
+        self.query_one(StudyStream).anchor()
+        self.query_one("#new_output", Static).update("")
+
+    async def action_clear_chat(self):
+        if self._busy():
+            await self.write_line("○ work is active · /cancel before clearing")
+            return
+        stream = self.query_one(StudyStream)
+        await stream.query(".turn, .notice").remove()
+        self.turns.clear()
+        self.notices.clear()
+        stream.dropped = 0
+        stream.summary.update("")
+        stream.summary.display = False
+
+    async def on_query_composer_submitted(self, event):
         query = event.value.strip()
         if not query:
             return
-
-        input_widget = self.query_one("#query_input", QueryComposer)
-        input_widget.clear()
-        self._resize_query_input()
-
+        if self.overlay:
+            if self.overlay.kind != "commands":
+                self.overlay.action_select()
+                return
+            if (
+                " " not in query
+                and (option := self.overlay.highlighted_option) is not None
+                and option.id.startswith(query)
+            ):
+                query = option.id
+            await self.close_overlay()
+        prompt = self.query_one(QueryComposer)
+        prompt.clear()
+        if self._pending_remove:
+            book = self._pending_remove
+            self._pending_remove = None
+            if query.lower() == "y":
+                await self._remove_book(book)
+            else:
+                await self.write_line("○ removal cancelled")
+            return
         if query.startswith("/"):
-            await self._handle_chat_command(query)
+            await dispatch_command(self, query)
             return
-
+        if self._busy():
+            active = self._pending_assistants.get(self._active_query_request_id)
+            if (
+                active
+                and active.record.phase not in {"CANCELLED", "ERROR"}
+                and not self._is_parsing
+            ):
+                if self.queued_query is None:
+                    self.queued_query = (
+                        query,
+                        self.active_collection_name,
+                        self.selected_model,
+                    )
+                    await self.write_line("○ queued")
+                else:
+                    await self.write_line(
+                        "○ queue full · one question is already queued"
+                    )
+                    prompt.load_text(query)
+            else:
+                await self.write_line("○ work is active · /cancel or wait")
+                prompt.load_text(query)
+            return
+        self._hide_home()
         if not self.active_collection_name:
-            self.notify("No active book selected. Please parse a PDF first.", severity="error")
+            await self.write_line("○ no book loaded · /parse <path>")
             return
+        if not self.selected_model:
+            await self.write_line("○ no model · /model <name>")
+            return
+        await self._submit_question(
+            query, self.active_collection_name, self.selected_model
+        )
 
-        history_str = self._format_history()
-        await self._append_chat_widget(UserMessage(query))
+    async def _flush_answer(self, request_id):
+        async with self._answer_flush_lock:
+            entry = self._answer_streams.get(request_id)
+            if not entry or request_id != self._active_query_request_id:
+                return
+            updater, pending = entry
+            if not pending:
+                return
+            delay = config.UI_FRAME_INTERVAL - (
+                time.monotonic() - self._last_answer_flush
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+            fragment = "".join(pending)
+            pending.clear()
+            self._last_answer_flush = time.monotonic()
+            await updater.write(fragment)
 
-        active_book = self.active_collection_name
-        model_name = self.selected_model or OLLAMA_MODEL
-        workload_token = self._try_acquire_workload("generation")
-        if workload_token is None:
-            message = "GPU work is busy with ingestion or generation. Try again when it finishes."
-            self.notify(message, severity="warning")
-            await self._append_chat_widget(AssistantMessage(message, is_error=True))
+    def _motion_active(self):
+        return bool(
+            self._active_query_request_id
+            or self._is_parsing
+            or self._copy_confirmation is not None
+            or time.monotonic() < self._completion_flash_until
+        )
+
+    def on_app_focus(self):
+        self._terminal_focused = True
+        self._focus_reports_seen = True
+        if self._motion_active():
+            self.motion.start()
+
+    def on_app_blur(self):
+        self._terminal_focused = False
+        self._focus_reports_seen = True
+        self.motion.stop()
+
+    def _motion_frame(self, now, clock):
+        if self._copy_confirmation is not None and now >= self._copy_expiry:
+            self._copy_confirmation.remove()
+            self._copy_confirmation = None
+        view = self._pending_assistants.get(self._active_query_request_id)
+        if view:
+            entry = self._answer_streams.get(view.record.request_id)
+            if (
+                entry
+                and entry[1]
+                and (
+                    self._answer_flush_worker is None
+                    or not self._answer_flush_worker.is_running
+                )
+            ):
+                self._answer_flush_worker = self.run_worker(
+                    self._flush_answer(view.record.request_id),
+                    group="answer-render",
+                    exit_on_error=False,
+                )
+            record = view.record
+            elapsed = clock.elapsed(view.started_at, now)
+            if record.phase in {"SUBMITTED", "RETRIEVING", "THINKING"}:
+                label = (
+                    "thinking" if record.phase == "THINKING" else "search_local_index"
+                )
+                text = Text(
+                    "\n".join(record.steps) + ("\n" if record.steps else ""),
+                    style="dim",
+                )
+                text.append("↳ ")
+                text.append_text(clock.label(label, now))
+                text.append(f" {clock.spinner} {elapsed}")
+                view.step_line.update(text)
+                self._status = f"{clock.spinner} working"
+                view.tail.display = record.phase == "THINKING" and clock.blink(now)
+            elif record.phase == "STREAMING":
+                self._status = "▌ writing"
+                view.tail.display = True
+            else:
+                view.tail.display = False
+            if view.tail.display:
+                self._position_tail(view)
+            stream = self.query_one(StudyStream)
+            if record.phase == "STREAMING" and not stream.is_vertical_scroll_end:
+                self.query_one("#new_output", Static).update("↓ new output · End")
+        if self._is_parsing and self._ingest_view:
+            lines = Text()
+            for stage in ("parse", "chunk", "embed", "index"):
+                if lines.plain:
+                    lines.append("\n")
+                lines.append("↳ ")
+                lines.append_text(
+                    clock.label(stage, now)
+                    if stage == self._ingest_stage
+                    else Text(stage, style="dim")
+                )
+                if stage in self._ingest_completed:
+                    lines.append(" ✓", style="dim")
+                elif stage == self._ingest_stage:
+                    counts = self._ingest_counts.get(stage)
+                    if counts:
+                        done, total = counts
+                        actual = done / total
+                        if now - self._progress_updated >= config.UI_COUNTER_INTERVAL:
+                            self._progress_shown += (
+                                actual - self._progress_shown
+                            ) * config.UI_PROGRESS_EASING
+                            self._progress_updated = now
+                        progress = render_progress(
+                            round(self._progress_shown * total * 8),
+                            total * 8,
+                            config.UI_PROGRESS_WIDTH,
+                        )
+                        rate_elapsed = max(0, now - self._ingest_count_started)
+                        eta = (
+                            f"~{(total-done)*rate_elapsed/done:.0f}s left"
+                            if done and rate_elapsed
+                            else "ETA unknown"
+                        )
+                        lines.append(
+                            f" {progress} {done}/{total} {int(actual*100)}% {clock.spinner} {eta}"
+                        )
+                    else:
+                        lines.append(f" {clock.spinner} · ETA unknown")
+                else:
+                    lines.append(" ○", style="dim")
+            if self._parse_detail:
+                lines.append("\n" + self._parse_detail, style="dim")
+            self._ingest_view.step_line.update(lines)
+            self._status = f"{clock.spinner} working"
+        if self._completion_view is not None:
+            self._completion_view.step_line.update(
+                Text(
+                    self._completion_text,
+                    style="bold" if now < self._completion_flash_until else "dim",
+                )
+            )
+            if now >= self._completion_flash_until:
+                self._completion_view = None
+        self._set_header()
+        if not self._motion_active():
+            clock.stop()
+
+    def _position_tail(self, view):
+        leaves = [
+            widget for widget in view.answer.query(Static) if widget.content_size.height
+        ]
+        leaf = leaves[-1] if leaves else view.answer
+        row = max(0, leaf.content_size.height - 1)
+        line = leaf.render_line(row).text.rstrip() if leaves else ""
+        x = leaf.content_region.x - view.region.x + Text(line).cell_len
+        y = leaf.content_region.y - view.region.y + row
+        view.tail.styles.offset = (
+            min(max(0, x), max(0, view.size.width - 1)),
+            max(0, y),
+        )
+
+    def _ingest_output(self, fallback_stage, line):
+        text = line.strip()
+        if not text:
+            return
+        stage = (
+            self._ingest_stage
+            if self._ingest_stage in {"parse", "chunk", "embed", "index"}
+            else fallback_stage
+        )
+        if fallback_stage == "parse":
+            stage = "parse"
+        elif re.search(
+            r"\b(?:embedding|embeddings|embedded|encoding|adding batch)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            stage = "embed"
+        elif re.search(r"\bchunk(?:ing|s)?\b", text, re.IGNORECASE):
+            stage = "chunk"
+        elif re.search(r"\bindex(?:ing)?\b", text, re.IGNORECASE):
+            stage = "index"
+        elif fallback_stage == "parse":
+            stage = "parse"
+        if stage != self._ingest_stage:
+            if self._ingest_stage in {"parse", "chunk", "embed", "index"}:
+                self._ingest_completed.add(self._ingest_stage)
+            self._ingest_stage = stage
+            self._progress_shown = 0
+            self._ingest_count_started = time.monotonic()
+        ratio = re.search(r"(?<![\d.])(\d+)\s*/\s*(\d+)(?![\d.])", text)
+        if ratio and 0 <= int(ratio[1]) <= int(ratio[2]) and int(ratio[2]) > 0:
+            self._ingest_counts[stage] = (int(ratio[1]), int(ratio[2]))
+        self._parse_detail = text[:180]
+        self.motion.start()
+
+    async def _submit_question(self, query, book, model):
+        token = self._try_acquire_workload("generation")
+        if token is None:
+            await self.write_line("○ GPU work is busy · /cancel or wait")
             return
         request_id = uuid4().hex
-        self._query_workload_token = workload_token
-        assistant = AssistantMessage(thinking=True)
-        self._pending_assistants[request_id] = assistant
-        self._request_books[request_id] = active_book
-        try:
-            await self._append_chat_widget(assistant, animate=False)
-            worker = self.run_worker(
-                lambda: self._execute_rag_query_with_admission(
-                    query, history_str, active_book, model_name, request_id, workload_token
-                ),
-                thread=True,
-                group="queries",
-                exit_on_error=False,
+        record = TurnRecord(request_id, query, book, model)
+        view = TurnView(record)
+        self.turns.append(view)
+        self._pending_assistants[request_id] = view
+        self._request_books[request_id] = book
+        self._request_context[request_id] = (
+            self._format_history(),
+            self.top_k_results,
+            self.distance_threshold,
+        )
+        self._transport_closed[request_id] = asyncio.Event()
+        self._query_workload_token = token
+        self._active_query_request_id = request_id
+        self._last_question = query
+        await self.query_one(StudyStream).add_turn(view)
+        view.step_line.update("↳ search_local_index …")
+        self._status = self.motion.spinner + " working"
+        self.motion.start()
+        self.motion.tick(time.monotonic())
+        self._set_header()
+        painted = asyncio.Event()
+        self.call_after_refresh(painted.set)
+        # Refresh callbacks need the app message pump; only the worker may wait.
+        self._active_query_worker = self.run_worker(
+            self._run_query(request_id, query, book, model, token, painted),
+            group="queries",
+            exit_on_error=False,
+        )
+        self._update_hint()
+
+    def _restore_queued_prompt(self):
+        if self.queued_query:
+            queued, _book, _model = self.queued_query
+            self.queued_query = None
+            prompt = self.query_one(QueryComposer)
+            draft = prompt.text
+            prompt.load_text(
+                queued + ("\n\n" + draft if draft and draft != queued else "")
             )
-        except Exception:
-            self._release_workload(workload_token)
-            self._query_workload_token = None
+            prompt.move_cursor(prompt.document.end)
+
+    async def _run_query(
+        self, request_id, query, book, model, workload_token, painted=None
+    ):
+        view = self._pending_assistants[request_id]
+        history, k, distance = self._request_context[request_id]
+        record = view.record
+        buffer = SafeAnswerBuffer()
+        client = OllamaClient()
+        retrieval = None
+        response = None
+        updater = None
+        pending = []
+        terminal_phase = "ERROR"
+        failure = ""
+        cleanup_ok = False
+        saw_done = False
+        started = time.monotonic()
+        try:
+            if painted is not None:
+                await painted.wait()
+            record.phase = "RETRIEVING"
+            retrieval = asyncio.create_task(
+                asyncio.to_thread(
+                    self._prepare_query, query, history, book, k, distance
+                )
+            )
+            prompt, metadata, pages, _ids = await asyncio.shield(retrieval)
+            if self._is_query_cancelled(request_id):
+                raise asyncio.CancelledError
+            self._last_retrieved_pages = pages
+            self._set_turn_evidence(request_id, "", book, metadata)
+            record.steps.append(
+                f"↳ search_local_index ✓ {len(metadata)} chunks · {time.monotonic()-started:.1f}s"
+            )
+            view.step_line.update(record.steps[-1] + "\n↳ thinking …")
+            record.phase = "THINKING"
+            updater = view.answer.get_stream(view.answer)
+
+            self._answer_streams[request_id] = (updater, pending)
+            response = client.astream_generate(prompt, model=model, think=False)
+            try:
+                async for data in response:
+                    if (
+                        self._active_query_request_id != request_id
+                        or self._is_query_cancelled(request_id)
+                    ):
+                        raise asyncio.CancelledError
+                    token = data.get("response", "")
+                    if token:
+                        pending.append(buffer.feed(token))
+                        record.raw_answer = buffer.raw
+                        record.copy_text = buffer.visible
+                        record.copy_is_sanitized = record.copy_text != record.raw_answer
+                        if record.phase != "STREAMING":
+                            record.steps.append(
+                                f"↳ thinking ✓ {time.monotonic()-started:.1f}s"
+                            )
+                            view.step_line.update("\n".join(record.steps))
+                        record.phase = "STREAMING"
+                        self._status = "▌ writing"
+                    await asyncio.sleep(0)
+                    if data.get("done"):
+                        saw_done = True
+                        break
+            finally:
+                await response.aclose()
+                self._transport_closed[request_id].set()
+            if not saw_done:
+                raise RuntimeError("Ollama stream ended before completion")
+            terminal_phase = "DONE"
+        except asyncio.CancelledError:
+            terminal_phase = "CANCELLED"
+            self._cancelled_query_ids.add(request_id)
+        except ConnectError:
+            failure = "✗ can't reach Ollama at localhost:11434 · start it, then /retry"
+        except ReadTimeout:
+            failure = "✗ local response timed out · /retry"
+        except HTTPStatusError as exc:
+            failure = (
+                f"✗ model {model} not found · /models"
+                if exc.response.status_code == 404
+                else f"✗ Ollama request failed ({exc.response.status_code}) · /retry"
+            )
+        except Exception as exc:  # noqa: BLE001
+            failure = f"✗ {type(exc).__name__}: {exc} · /retry"
+        finally:
+            if response is None:
+                self._transport_closed[request_id].set()
+            await self._flush_answer(request_id)
+            if updater:
+                await updater.stop()
+            record.set_answer(buffer.raw)
+            await view.finalize(terminal_phase)
+            if terminal_phase == "DONE":
+                self._completion_view = view
+                self._completion_text = f"✓ {len(record.steps)} steps · {time.monotonic()-started:.1f}s · /details"
+                self._completion_flash_until = (
+                    time.monotonic() + config.UI_COMPLETION_FLASH_SECONDS
+                )
+                self.motion.start()
+            if terminal_phase == "CANCELLED":
+                view.step_line.update("○ cancelled")
+            elif failure:
+                view.step_line.add_class("failed")
+                view.step_line.update(failure)
+            else:
+                self._conversation.extend(
+                    [
+                        {"role": "user", "content": query},
+                        {"role": "assistant", "content": record.copy_text},
+                    ]
+                )
+                self._conversation = self._conversation[-10:]
+            if terminal_phase != "DONE":
+                self._restore_queued_prompt()
+            self._status = "○ cleaning up"
+            self._set_header()
+            # Cancelling the await cannot stop a CPU embedding thread.
+            if retrieval is not None and not retrieval.done():
+                try:
+                    await asyncio.shield(retrieval)
+                except Exception:  # noqa: BLE001, S110
+                    pass
+            try:
+                await asyncio.to_thread(client.unload_and_wait)
+            except Exception as exc:  # noqa: BLE001
+                await self.write_line(
+                    f"✗ could not confirm local model cleanup; GPU work remains blocked. {exc}"
+                )
+                self._restore_queued_prompt()
+                self._status = "○ cleanup blocked"
+            else:
+                self._release_workload(workload_token)
+                self._query_workload_token = None
+                cleanup_ok = True
+                self._status = "● ready"
             self._pending_assistants.pop(request_id, None)
             self._request_books.pop(request_id, None)
-            raise
-        self._active_query_worker = worker
-        self._active_query_request_id = request_id
+            self._request_context.pop(request_id, None)
+            self._transport_closed.pop(request_id, None)
+            self._answer_streams.pop(request_id, None)
+            self._cancelled_query_ids.discard(request_id)
+            if self._active_query_request_id == request_id:
+                self._active_query_request_id = None
+                self._active_query_worker = None
+            self._set_header()
+            self._update_hint()
+            if cleanup_ok and terminal_phase == "DONE" and self.queued_query:
+                queued = self.queued_query
+                self.queued_query = None
+                await self._submit_question(*queued)
+
+    async def _cancel_active_query(self):
+        request_id = self._active_query_request_id
+        view = self._pending_assistants.get(request_id)
+        if view is None or view.record.phase == "CANCELLED":
+            return
+        if view.record.phase in {"DONE", "ERROR"}:
+            self._restore_queued_prompt()
+            return
+        self._cancelled_query_ids.add(request_id)
+        view.record.set_answer(view.record.raw_answer)
+        view.record.phase = "CANCELLED"
+        view.step_line.update("○ cancelled")
+        self._restore_queued_prompt()
+        self._status = "○ cleaning up"
+        self._set_header()
+        closed = self._transport_closed[request_id]
+        if self._active_query_worker:
+            # Let a newly scheduled worker enter its cleanup-protected body.
+            await asyncio.sleep(0)
+            self._active_query_worker.cancel()
+        try:
+            await asyncio.wait_for(closed.wait(), timeout=config.UI_CANCEL_TIMEOUT)
+        except TimeoutError:
+            await self.write_line(
+                "✗ client abort is still pending · GPU work remains blocked"
+            )
+        self._update_hint()
+
+    async def handle_command(self, name, arguments):
+        spec = COMMANDS[name]
+        if name == "/delete":
+            name = "/remove"
+
+        def usage():
+            return self.write_line(f"○ usage: {spec.name} {spec.usage}".rstrip())
+
+        if name in {"/thinking", "/web"}:
+            allowed = {"on", "off", "show"} if name == "/thinking" else {"on", "off"}
+            if len(arguments) != 1 or arguments[0] not in allowed:
+                await usage()
+            else:
+                await self.write_line(
+                    f"○ {name[1:]} off"
+                    if arguments[0] == "off"
+                    else f"○ {name} is available in Phase {spec.available_phase}"
+                )
+            return
+        if spec.available_phase > 1:
+            await self.write_line(
+                f"○ {name} is available in Phase {spec.available_phase}"
+            )
+            return
+        if (
+            name in {"/book", "/model", "/remove", "/k", "/d", "/accent"}
+            and not arguments
+        ):
+            await usage()
+            return
+        if (
+            name
+            in {
+                "/help",
+                "/models",
+                "/retry",
+                "/clear",
+                "/new",
+                "/settings",
+                "/cancel",
+                "/quit",
+                "/gpu-parsing",
+                "/gpu-status",
+            }
+            and arguments
+        ):
+            await usage()
+            return
+        if name == "/help":
+            await self.write_line(
+                "\n".join(
+                    f"{s.name} {s.usage} · {s.description}".replace("  ", " ")
+                    for s in COMMANDS.values()
+                )
+            )
+        elif name == "/books":
+            try:
+                self._book_counts = await asyncio.to_thread(self._discover_books)
+                filtered = [
+                    f"{book} ({count})"
+                    for book, count in self._book_counts.items()
+                    if " ".join(arguments).casefold() in book.casefold()
+                ]
+                filtered.extend(
+                    f"{book} (incomplete or unavailable · /remove {shlex.quote(book)} or /parse <path>)"
+                    for book in self._unavailable_books
+                    if " ".join(arguments).casefold() in book.casefold()
+                )
+                await self.write_line(
+                    "\n".join(filtered) or "○ no book loaded · /parse <path>"
+                )
+                names = [
+                    book
+                    for book in self._book_counts
+                    if " ".join(arguments).casefold() in book.casefold()
+                ]
+                if names:
+                    await self._show_overlay(names, "books")
+                    self.overlay.focus()
+            except Exception as exc:  # noqa: BLE001
+                await self.write_line(f"✗ book discovery failed: {exc} · /books")
+        elif name in {"/book", "/model", "/remove"}:
+            if self._busy():
+                await self.write_line(
+                    "○ work is active · /cancel before switching or removing"
+                )
+                return
+            value = " ".join(arguments)
+            if name == "/model":
+                if value not in self._models:
+                    await self.write_line(f"✗ model {value} not found · /models")
+                    return
+                self.selected_model = value
+            else:
+                matches = [
+                    book
+                    for book in self._book_counts | self._unavailable_books
+                    if value.casefold()
+                    in {book.casefold(), self._format_book_name(book).casefold()}
+                ]
+                if len(matches) != 1:
+                    await self.write_line("○ book not found · /books")
+                    return
+                value = matches[0]
+                if name == "/remove":
+                    self._pending_remove = value
+                    await self.write_line(f"○ remove {value}? type y to confirm")
+                    return
+                if value in self._unavailable_books:
+                    await self.write_line(
+                        f"✗ {value}: incomplete or unavailable index · /remove {shlex.quote(value)} or /parse <path>"
+                    )
+                    return
+                self.active_collection_name = value
+                self._conversation.clear()
+                self._last_retrieved_pages.clear()
+            self._refresh_condition()
+            self._set_header()
+        elif name == "/models":
+            try:
+                self._models = await asyncio.to_thread(self._fetch_ollama_models)
+                await self.write_line(
+                    "\n".join(self._models) or "○ no model · /model <name>"
+                )
+            except Exception:  # noqa: BLE001
+                await self.write_line(
+                    "✗ can't reach Ollama at localhost:11434 · start it, then /retry"
+                )
+        elif name in {"/k", "/d"}:
+            try:
+                if len(arguments) != 1:
+                    raise ValueError("one value required")
+                value = int(arguments[0]) if name == "/k" else float(arguments[0])
+                if (
+                    name == "/k"
+                    and not 3 <= value <= 20
+                    or name == "/d"
+                    and (not math.isfinite(value) or value < 0)
+                ):
+                    raise ValueError("out of range")
+            except ValueError:
+                await usage()
+                return
+            if name == "/k":
+                self.top_k_results = value
+            else:
+                self.distance_threshold = value
+            await self.write_line(f"○ {name[1:]} = {value}")
+        elif name in {"/sources", "/details", "/copy"}:
+            code = name == "/copy" and arguments[:1] == ["code"]
+            numbers = arguments[1:] if code else arguments
+            try:
+                if len(numbers) > 1:
+                    raise ValueError("one index required")
+                index = int(numbers[0]) if numbers else 1
+                if index < 1:
+                    raise ValueError("positive index required")
+            except ValueError:
+                await usage()
+                return
+            completed = [turn for turn in self.turns if turn.record.phase == "DONE"]
+            if code:
+                blocks = [
+                    block
+                    for turn in completed
+                    for block in extract_fenced_blocks(turn.record.raw_answer)
+                ]
+                if index > len(blocks):
+                    await self.write_line("○ no code block to copy")
+                    return
+                await self._copy(blocks[-index].source)
+                return
+            if index > len(completed):
+                await self.write_line("○ no completed answer")
+                return
+            turn = completed[-index]
+            if name == "/copy":
+                await self._copy(turn.record.copy_payload())
+            elif name == "/sources":
+                turn.show_sources()
+            else:
+                turn.detail_line.display = True
+                turn.detail_line.update(
+                    "\n".join(turn.record.steps) or "○ no recorded tool steps"
+                )
+        elif name in {"/clear", "/new"}:
+            if self._busy():
+                await self.write_line("○ work is active · /cancel before clearing")
+                return
+            await self.action_clear_chat()
+            if name == "/new":
+                self._conversation.clear()
+                self._last_retrieved_pages.clear()
+                self._request_books.clear()
+                self.queued_query = None
+        elif name == "/retry":
+            if self._last_question:
+                await self.on_query_composer_submitted(
+                    QueryComposer.Submitted(
+                        self.query_one(QueryComposer), self._last_question
+                    )
+                )
+            else:
+                self.run_worker(
+                    self._run_startup_checks(),
+                    group="startup",
+                    exclusive=True,
+                    exit_on_error=False,
+                )
+        elif name == "/settings":
+            await self._show_overlay(
+                [
+                    f"/k {self.top_k_results}",
+                    f"/d {self.distance_threshold}",
+                    "/theme",
+                    "/thinking off",
+                    "/web off",
+                    "/gpu-status",
+                ],
+                "settings",
+            )
+            self.overlay.focus()
+        elif name == "/theme":
+            names = ["terminal", "mono", *THEMES, *self.custom_themes]
+            if len(arguments) > 1:
+                await usage()
+                return
+            if self.overlay:
+                await self.close_overlay()
+            self._preview = ThemePreview(
+                self, self.settings, self.settings_path, os.environ
+            )
+            if arguments:
+                value = arguments[0]
+                if value not in names:
+                    await self.write_line(
+                        f'✗ theme "{value}" invalid: unknown theme · using terminal'
+                    )
+                    await resolve_theme(self, type(self.settings)(), os.environ)
+                    self._preview = None
+                    return
+                try:
+                    await self._preview.preview(value)
+                    await self._theme_notice(value)
+                    await self._preview.keep(value)
+                except (OSError, ValueError) as exc:
+                    await self.write_line(
+                        f"✗ theme save failed: {exc} · previous theme restored"
+                    )
+                self._preview = None
+            else:
+                await self._show_overlay(names, "themes")
+                self.overlay.focus()
+        elif name == "/accent":
+            if len(arguments) != 1 or arguments[0] not in ANSI_COLORS:
+                await usage()
+                return
+            previous = self.settings.accent
+            try:
+                save_theme_selection(
+                    self.settings_path, self.settings.theme, arguments[0]
+                )
+                self.settings.accent = arguments[0]
+                await resolve_theme(self, self.settings, os.environ)
+            except (OSError, ValueError) as exc:
+                self.settings.accent = previous
+                await self.write_line(f"✗ settings save failed: {exc}")
+        elif name == "/parse":
+            await self._start_parse_command(arguments)
+        elif name == "/gpu-parsing":
+            if self._busy():
+                await self.write_line(
+                    "○ work is active · wait before changing ingest device"
+                )
+                return
+            self._use_gpu_for_embeddings = not self._use_gpu_for_embeddings
+            await self.write_line(
+                "○ ingest embeddings: "
+                + (
+                    "GPU"
+                    if self._use_gpu_for_embeddings
+                    else "CPU (explicit degraded mode)"
+                )
+            )
+        elif name == "/gpu-status":
+            await self.write_line(
+                "○ ingest embeddings: "
+                + (
+                    "GPU"
+                    if self._use_gpu_for_embeddings
+                    else "CPU (explicit degraded mode)"
+                )
+            )
+        elif name == "/cancel":
+            self.action_cancel_query()
+        elif name == "/quit":
+            await self.action_quit()
+
+    async def _copy(self, text):
+        ok, message = await asyncio.to_thread(copy_text, self, text)
+        lines = message.splitlines()
+        if ok and lines[-1].startswith("copied "):
+            for line in lines[:-1]:
+                await self.write_line(line)
+            if self._copy_confirmation:
+                await self._copy_confirmation.remove()
+            self._copy_confirmation = Static(
+                lines[-1], classes="tool-line copy-confirmation", markup=False
+            )
+            self._copy_expiry = time.monotonic() + config.UI_COPY_CONFIRM_SECONDS
+            stream = self.query_one(StudyStream)
+            await stream.mount(self._copy_confirmation, before=stream.spacer)
+            self.motion.start()
+        else:
+            await self.write_line(message)
+
+    async def _remove_book(self, book):
+        if self._busy():
+            await self.write_line("○ work is active · /cancel before removing")
+            return
+        self._deleting = True
+        try:
+            deleted = await asyncio.to_thread(delete_collection, book)
+            if not deleted:
+                await self.write_line("○ book not found · /books")
+                return
+            self._book_counts.pop(book, None)
+            self._unavailable_books.pop(book, None)
+            for turn in list(self.turns):
+                if turn.record.book == book:
+                    await turn.remove()
+                    self.turns.remove(turn)
+            self._conversation.clear()
+            self._last_retrieved_pages.clear()
+            if self.active_collection_name == book:
+                self.active_collection_name = next(iter(self._book_counts), None)
+            self._refresh_condition()
+            self._set_header()
+            await self.write_line(f"✓ removed {book}")
+        except Exception as exc:  # noqa: BLE001
+            await self.write_line(f"✗ remove failed: {exc} · /books")
+        finally:
+            self._deleting = False
+
+    def action_cancel_query(self):
+        if self._is_parsing:
+            self._ingest_cancelled = True
+            self.run_worker(
+                lambda: self._terminate_job_processes(),
+                thread=True,
+                exit_on_error=False,
+            )
+            return
+        if self._active_query_request_id:
+            self.run_worker(
+                self._cancel_active_query(),
+                group="cancel-query",
+                exclusive=True,
+                exit_on_error=False,
+            )
+
+    def _set_turn_evidence(self, request_id, raw, book, metadata):
+        view = self._pending_assistants.get(request_id)
+        if view is None or request_id in self._cancelled_query_ids:
+            return
+        view.record.set_answer(raw)
+        sources = []
+        for meta in metadata:
+            page = meta.get("physical_page", meta.get("page"))
+            try:
+                page = int(page)
+                if page < 1:
+                    page = None
+            except (TypeError, ValueError):
+                page = None
+            source = SourceRef(
+                book,
+                page,
+                meta.get("chapter") or meta.get("Header 1"),
+                meta.get("section") or meta.get("Header 2"),
+            )
+            if source not in sources:
+                sources.append(source)
+        view.record.sources = sources
+
+    async def _stream_query_token(self, request_id, token):
+        view = self._pending_assistants.get(request_id)
+        if view and request_id not in self._cancelled_query_ids:
+            await view.answer.append(token)
+
+    async def _finalize_query(
+        self, request_id, message, query, is_error, telemetry_badge=None
+    ):
+        view = self._pending_assistants.get(request_id)
+        if view is None or request_id in self._cancelled_query_ids:
+            return
+        if not view.record.raw_answer or is_error:
+            view.record.set_answer(message)
+        await view.finalize("ERROR" if is_error else "DONE")
+        if not is_error:
+            self._conversation.extend(
+                [
+                    {"role": "user", "content": query},
+                    {"role": "assistant", "content": view.record.copy_text},
+                ]
+            )
+            self._conversation = self._conversation[-10:]
+        self._pending_assistants.pop(request_id, None)
+        self._request_books.pop(request_id, None)
+        if self._active_query_request_id == request_id:
+            self._active_query_request_id = None
+            self._status = "● ready"
+            self._set_header()
+        self._update_hint()
+
+    async def _finalize_query_cancelled(self, request_id):
+        view = self._pending_assistants.pop(request_id, None)
+        if view:
+            view.record.phase = "CANCELLED"
+            view.step_line.update("○ cancelled")
+        if self._active_query_request_id == request_id:
+            self._active_query_request_id = None
+            self._status = "○ cleaning up"
+            self._set_header()
+        self._update_hint()
+
+    async def _finalize_query_transient_error(self, request_id, message):
+        view = self._pending_assistants.get(request_id)
+        if view:
+            await self._finalize_query(request_id, message, view.record.question, True)
+
+    async def _start_parse_command(self, arguments):
+        if not arguments:
+            await self.write_line(
+                "○ usage: /parse <path> [--mode auto|pymupdf4llm|mineru|marker] [--cpu-embeddings]"
+            )
+            return
+        path = arguments[0]
+        mode = "auto"
+        cpu = False
+        rest = arguments[1:]
+        while rest:
+            option = rest.pop(0)
+            if option == "--cpu-embeddings":
+                cpu = True
+            elif option == "--mode" and rest:
+                mode = rest.pop(0)
+            else:
+                await self.write_line(
+                    "○ usage: /parse <path> [--mode auto|pymupdf4llm|mineru|marker] [--cpu-embeddings]"
+                )
+                return
+        if mode not in {"auto", "pymupdf4llm", "mineru", "marker"}:
+            await self.write_line("○ invalid parser mode · /help")
+            return
+        await self._start_parse_and_index(path, mode, cpu)
+
+    async def _start_parse_and_index(self, raw_path, mode_value="auto", cpu=False):
+        if self._busy():
+            await self.write_line("○ GPU work is busy · /cancel or wait")
+            return
+        pdf_path = Path(raw_path).expanduser().resolve()
+        if not pdf_path.is_file() or pdf_path.suffix.lower() != ".pdf":
+            await self.write_line("✗ PDF file not found · /parse <path>")
+            return
+        token = self._try_acquire_workload("ingest")
+        if token is None:
+            return
+        self._hide_home()
+        self._is_parsing = True
+        self._ingest_cancelled = False
+        self._parse_workload_token = token
+        self._ingest_path = str(pdf_path)
+        self._parse_started_at = time.monotonic()
+        if cpu:
+            self._use_gpu_for_embeddings = False
+        record = TurnRecord(
+            uuid4().hex,
+            "/parse " + shlex.quote(str(pdf_path)),
+            pdf_path.stem,
+            self.selected_model,
+            phase="INGEST",
+        )
+        self._ingest_view = TurnView(record)
+        self.turns.append(self._ingest_view)
+        await self.query_one(StudyStream).add_turn(self._ingest_view)
+        self._ingest_stage = "preparing"
+        self._ingest_counts.clear()
+        self._ingest_completed.clear()
+        self._set_parse_runtime_status(stage="Preparing parse job", engine=mode_value)
+        self.run_worker(
+            lambda: self._parse_and_index_worker(str(pdf_path), mode_value, token),
+            thread=True,
+            group="parse",
+            exit_on_error=False,
+        )
+        self._update_hint()
+
+    def _set_parse_runtime_status(
+        self, stage=None, engine=None, detail=None, target_progress=None
+    ):
+        if stage:
+            self._parse_current_stage = stage
+            fallback = (
+                "parse"
+                if "Parsing PDF" in stage
+                else "index" if "Indexing" in stage else "preparing"
+            )
+            self._ingest_output(fallback, stage)
+        if engine:
+            self._parse_current_engine = engine
+        if detail:
+            self._parse_detail = detail
+        self.motion.start()
+
+    async def _finish_parse_and_index(self, book_stem, page_count, chunks, error):
+        self._is_parsing = False
+        if self._ingest_view:
+            self._ingest_view.record.phase = "ERROR" if error else "DONE"
+            message = (
+                f"✗ ingest failed: {error} · partial index may be incomplete · parsed checkpoints preserved · retry /parse {shlex.quote(self._ingest_path)}"
+                if error
+                else f"✓ {book_stem} · {page_count} pages · {chunks} chunks"
+            )
+            if self._ingest_cancelled:
+                self._ingest_view.record.phase = "CANCELLED"
+                message = "○ cancelled · resume with /parse " + shlex.quote(
+                    self._ingest_path
+                )
+            if not error and not self._ingest_cancelled:
+                message = Text.assemble(
+                    "✓ ",
+                    (book_stem, f"link {Path(self._ingest_path).as_uri()}"),
+                    f" · {page_count} pages · {chunks} chunks",
+                )
+            self._ingest_view.step_line.set_class(
+                bool(error) and not self._ingest_cancelled, "failed"
+            )
+            self._ingest_view.step_line.update(message)
+        if not error and not self._ingest_cancelled:
+            self._book_counts[book_stem] = chunks
+            self.active_collection_name = book_stem
+            self._conversation.clear()
+            self._last_retrieved_pages.clear()
+        self._status = "● ready"
+        self._refresh_condition()
+        self._set_header()
+        self._update_hint()
+
+    def _terminate_job_processes(self):
+        with self._process_lock:
+            processes = list(self._active_processes)
+        for process in processes:
+            self._stop_process_group(process)
+
+    async def action_quit(self):
+        self._restore_queued_prompt()
+        worker = self._active_query_worker
+        if self._active_query_request_id:
+            await self._cancel_active_query()
+        self._ingest_cancelled = True
+        await asyncio.to_thread(self._terminate_active_processes)
+        if worker:
+            try:
+                await worker.wait()
+            except (WorkerCancelled, WorkerFailed):
+                pass
+        await asyncio.to_thread(self._release_model_owners)
+        self.motion.stop()
+        self.exit()
+
+    @staticmethod
+    def _release_model_owners():
+        import gc
+
+        module = sys.modules.get("src.db")
+        if module is not None:
+            # Startup discovery may still be importing the database dependencies.
+            if hasattr(module, "_QUERY_MODEL"):
+                module._QUERY_MODEL = None
+            if getattr(module, "_INGEST_MODEL", None) is not None:
+                module.release_ingest_model()
+            gc.collect()
+
+    def on_unmount(self):
+        self.motion.stop()
+        if self._active_query_request_id:
+            self._cancelled_query_ids.add(self._active_query_request_id)
+        self._terminate_active_processes()
 
     def _try_acquire_workload(self, kind: WorkloadKind) -> str | None:
         return self._workload_coordinator.try_acquire(kind)
@@ -1353,31 +1703,40 @@ class AxiomLMApp(App):
         workload_token: str,
     ) -> None:
         try:
-            self.execute_rag_query(query, history_str, book_stem, model_name, request_id)
+            self.execute_rag_query(
+                query, history_str, book_stem, model_name, request_id
+            )
         finally:
             try:
                 # Closing a client stream requests server-side cancellation, but
                 # admission stays owned until Ollama confirms model cleanup.
                 OllamaClient().unload_and_wait()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 try:
                     self.call_from_thread(
                         self._report_generation_cleanup_failure,
                         f"{type(exc).__name__}: {exc}",
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
             else:
                 self._release_workload(workload_token)
                 if self._query_workload_token == workload_token:
                     self._query_workload_token = None
+                if self._loop is not None:
+                    self.call_from_thread(self._generation_cleaned)
+
+    def _generation_cleaned(self):
+        self._status = "● ready"
+        self._set_header()
+        self._update_hint()
 
     def _report_generation_cleanup_failure(self, detail: str) -> None:
-        self.notify(
-            f"Could not confirm local model cleanup; GPU work remains blocked. {detail}",
-            severity="error",
-            timeout=10,
-        )
+        message = f"✗ could not confirm local model cleanup; GPU work remains blocked. {detail}"
+        if self._loop is not None:
+            self.run_worker(self.write_line(message), exit_on_error=False)
+        else:
+            self.notices.append(message)
 
     def _format_history(self) -> str:
         if not self._conversation:
@@ -1387,15 +1746,6 @@ class AxiomLMApp(App):
             role = "User" if turn["role"] == "user" else "Axie"
             lines.append(f"{role}: {turn['content']}")
         return "\n".join(lines) + "\n"
-
-    def _is_followup(self, query: str) -> bool:
-        FOLLOWUP_SIGNALS = [
-            "this topic", "give me", "an example", "another", 
-            "that", "this", "same", "more", "elaborate", "explain further",
-            "it", "they", "them", "those"
-        ]
-        q = query.lower()
-        return any(s in q for s in FOLLOWUP_SIGNALS)
 
     def build_citation(self, book_stem: str) -> str:
         """
@@ -1415,131 +1765,172 @@ class AxiomLMApp(App):
         """
         return parse_page_intent(query)
 
-    def execute_rag_query(self, query: str, history_str: str, book_stem: str, model_name: str, request_id: str) -> None:
+    def _prepare_query(self, query, history_str, book_stem, k, distance_threshold):
+        # Augment retrieval query with history if it's vague/short
+        retrieval_query = query
+        vague_terms = {
+            "it",
+            "this",
+            "that",
+            "they",
+            "example",
+            "question",
+            "more",
+            "explain",
+            "help",
+            "detail",
+        }
+        query_words = set(query.lower().split())
+        is_vague = bool(query_words & vague_terms) or len(query_words) < 5
+
+        if is_vague and self._conversation:
+            # Add context from the last user message to improve retrieval relevance
+            for msg in reversed(self._conversation):
+                if msg["role"] == "user":
+                    # If the user is asking for examples/questions, broaden search significantly
+                    if any(
+                        term in query.lower()
+                        for term in ["example", "question", "exercise", "problem"]
+                    ):
+                        retrieval_query = f"{msg['content']} illustrative examples exercises questions problems"
+                    else:
+                        prev_context = " ".join(msg["content"].split()[:20])
+                        retrieval_query = f"{prev_context} {query}"
+                    break
+
+        # Always retrieve the rewritten query so follow-ups get fresh evidence.
+        target_pages = self.extract_page_intent(query)
+        q_vec = embed_query(retrieval_query)
+        collection = get_collection(book_stem)
+        ensure_collection_ready(collection)
+        where_clause: dict[str, object] | None = None
+        if target_pages:
+            if len(target_pages) == 1:
+                where_clause = {"physical_page": target_pages[0]}
+            else:
+                where_clause = {"physical_page": {"$in": target_pages}}
+
+        query_kwargs: dict[str, object] = {
+            "query_embeddings": [q_vec],
+            "n_results": k,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if where_clause is not None:
+            query_kwargs["where"] = where_clause
+        results = collection.query(**query_kwargs)
+
+        context_blocks = []
+        metadatas = []
+        retrieved_pages: list[int] = []
+        selected_ids = []
+        retrieved_ids = (results.get("ids") or [[]])[0]
+        retrieved_docs = results.get("documents") or [[]]
+        retrieved_meta = results.get("metadatas") or [[]]
+        retrieved_distances = results.get("distances") or [[]]
+        has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
+
+        # If explicit page filter finds nothing, gracefully fall back to global semantic search.
+        if target_pages and not has_retrieved_context:
+            fallback_results = collection.query(
+                query_embeddings=[q_vec],
+                n_results=k,
+                include=["documents", "metadatas", "distances"],
+            )
+            retrieved_ids = (fallback_results.get("ids") or [[]])[0]
+            retrieved_docs = fallback_results.get("documents") or [[]]
+            retrieved_meta = fallback_results.get("metadatas") or [[]]
+            retrieved_distances = fallback_results.get("distances") or [[]]
+            has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
+            message = "○ no chunks found for requested pages · used semantic fallback"
+            if self._loop is not None:
+                self.call_from_thread(self.write_line, message)
+
+        if has_retrieved_context:
+            chunks = retrieved_docs[0]
+            raw_metadatas = (
+                retrieved_meta[0]
+                if retrieved_meta and retrieved_meta[0]
+                else [{} for _ in chunks]
+            )
+            distances = retrieved_distances[0] if retrieved_distances else []
+            for idx, (chunk, meta) in enumerate(zip(chunks, raw_metadatas)):
+                if idx < len(distances):
+                    distance = distances[idx]
+                    # Be more lenient for vague queries
+                    limit = distance_threshold * 1.4 if is_vague else distance_threshold
+                    if isinstance(distance, (int, float)) and distance >= limit:
+                        continue
+                metadatas.append(meta)
+                if idx < len(retrieved_ids):
+                    selected_ids.append(retrieved_ids[idx])
+                h1 = meta.get("Header 1", "Unknown Chapter")
+                h2 = meta.get("Header 2", "Unknown Section")
+                page_info_raw = meta.get("physical_page", meta.get("page", "N/A"))
+                normalized_page: int | None = None
+                try:
+                    parsed_page = int(page_info_raw)
+                    if parsed_page >= 1:
+                        normalized_page = parsed_page
+                except (TypeError, ValueError):
+                    normalized_page = None
+                if normalized_page is not None:
+                    retrieved_pages.append(normalized_page)
+                    page_info = normalized_page
+                else:
+                    page_info = page_info_raw
+                context_blocks.append(f"[{h1} · {h2} · p.{page_info}]\n{chunk}")
+
+        prompt = PROMPT_TEMPLATE.format(
+            book=book_stem,
+            chapter=(
+                ",".join(sorted({m.get("Header 1", "Unknown") for m in metadatas}))
+                if metadatas
+                else "General Knowledge"
+            ),
+            pages=(
+                ",".join(
+                    sorted(
+                        {
+                            str(m.get("physical_page", m.get("page", "?")))
+                            for m in metadatas
+                        }
+                    )
+                )
+                if metadatas
+                else "N/A"
+            ),
+            history=history_str,
+            context=(
+                "\n\n".join(context_blocks)
+                if context_blocks
+                else "No direct context retrieved from indexed files."
+            ),
+            question=query,
+        )
+
+        return prompt, metadatas, retrieved_pages, selected_ids
+
+    def execute_rag_query(
+        self,
+        query: str,
+        history_str: str,
+        book_stem: str,
+        model_name: str,
+        request_id: str,
+    ) -> None:
         try:
             if self._is_query_cancelled(request_id):
                 self.call_from_thread(self._finalize_query_cancelled, request_id)
                 return
 
-            # Augment retrieval query with history if it's vague/short
-            retrieval_query = query
-            vague_terms = {"it", "this", "that", "they", "example", "question", "more", "explain", "help", "detail"}
-            query_words = set(query.lower().split())
-            is_vague = bool(query_words & vague_terms) or len(query_words) < 5
-            
-            if is_vague and self._conversation:
-                # Add context from the last user message to improve retrieval relevance
-                for msg in reversed(self._conversation):
-                    if msg["role"] == "user":
-                        # If the user is asking for examples/questions, broaden search significantly
-                        if any(term in query.lower() for term in ["example", "question", "exercise", "problem"]):
-                            retrieval_query = f"{msg['content']} illustrative examples exercises questions problems"
-                        else:
-                            prev_context = " ".join(msg["content"].split()[:20])
-                            retrieval_query = f"{prev_context} {query}"
-                        break
-
-            # Always retrieve the rewritten query so follow-ups get fresh evidence.
-            is_followup = self._is_followup(query)
-            target_pages = self.extract_page_intent(query)
-            q_vec = embed_query(retrieval_query)
-            collection = get_collection(book_stem)
-            ensure_collection_ready(collection)
-            where_clause: dict[str, object] | None = None
-            if target_pages:
-                if len(target_pages) == 1:
-                    where_clause = {"physical_page": target_pages[0]}
-                else:
-                    where_clause = {"physical_page": {"$in": target_pages}}
-
-            query_kwargs: dict[str, object] = {
-                "query_embeddings": [q_vec],
-                "n_results": 8,
-                "include": ["documents", "metadatas", "distances"],
-            }
-            if where_clause is not None:
-                query_kwargs["where"] = where_clause
-            results = collection.query(**query_kwargs)
-                
-            context_blocks = []
-            metadatas = []
-            retrieved_pages: list[int] = []
-            retrieved_docs = results.get("documents") or [[]]
-            retrieved_meta = results.get("metadatas") or [[]]
-            retrieved_distances = results.get("distances") or [[]]
-            has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
-
-            # If explicit page filter finds nothing, gracefully fall back to global semantic search.
-            if target_pages and not has_retrieved_context:
-                fallback_results = collection.query(
-                    query_embeddings=[q_vec],
-                    n_results=8,
-                    include=["documents", "metadatas", "distances"],
-                )
-                retrieved_docs = fallback_results.get("documents") or [[]]
-                retrieved_meta = fallback_results.get("metadatas") or [[]]
-                retrieved_distances = fallback_results.get("distances") or [[]]
-                has_retrieved_context = bool(retrieved_docs and retrieved_docs[0])
-                self.call_from_thread(
-                    self.notify,
-                    "No chunks found for requested page(s); used semantic fallback.",
-                    severity="warning",
-                )
-                
-            if has_retrieved_context:
-                chunks = retrieved_docs[0]
-                raw_metadatas = retrieved_meta[0] if retrieved_meta and retrieved_meta[0] else [{} for _ in chunks]
-                distances = retrieved_distances[0] if retrieved_distances else []
-                for idx, (chunk, meta) in enumerate(zip(chunks, raw_metadatas)):
-                    if idx < len(distances):
-                        distance = distances[idx]
-                        # Be more lenient for vague queries
-                        limit = self.distance_threshold * 1.4 if is_vague else self.distance_threshold
-                        if isinstance(distance, (int, float)) and distance >= limit:
-                            continue
-                    metadatas.append(meta)
-                    h1 = meta.get("Header 1", "Unknown Chapter")
-                    h2 = meta.get("Header 2", "Unknown Section")
-                    page_info_raw = meta.get("physical_page", meta.get("page", "N/A"))
-                    normalized_page: int | None = None
-                    try:
-                        parsed_page = int(page_info_raw)
-                        if parsed_page >= 1:
-                            normalized_page = parsed_page
-                    except (TypeError, ValueError):
-                        normalized_page = None
-                    if normalized_page is not None:
-                        retrieved_pages.append(normalized_page)
-                        page_info = normalized_page
-                    else:
-                        page_info = page_info_raw
-                    context_blocks.append(f"[{h1} · {h2} · p.{page_info}]\n{chunk}")
-                
-            self._last_retrieved_pages = retrieved_pages
-
-            # DEBUG PRINTS
-            print(f"\n[DEBUG RAG] history_str: {history_str[:100]}...")
-            print(f"[DEBUG RAG] is_followup: {is_followup}")
-            print(f"[DEBUG RAG] context size: {len(context_blocks)} blocks")
-            if context_blocks:
-                print(f"[DEBUG RAG] context snippet: {context_blocks[0][:200]}...")
-            
-            prompt = PROMPT_TEMPLATE.format(
-                book=book_stem,
-                chapter=",".join(sorted({m.get("Header 1", "Unknown") for m in metadatas}))
-                if metadatas
-                else "General Knowledge",
-                pages=",".join(
-                    sorted({str(m.get("physical_page", m.get("page", "?"))) for m in metadatas})
-                )
-                if metadatas
-                else "N/A",
-                history=history_str,
-                context="\n\n".join(context_blocks)
-                if context_blocks
-                else "No direct context retrieved from indexed files.",
-                question=query,
+            prompt, metadatas, retrieved_pages, _ids = self._prepare_query(
+                query,
+                history_str,
+                book_stem,
+                self.top_k_results,
+                self.distance_threshold,
             )
+            self._last_retrieved_pages = retrieved_pages
 
             accumulated_response = ""
             inference_badge: str | None = None
@@ -1550,7 +1941,9 @@ class AxiomLMApp(App):
                 prompt, model=model_name, stream=True, think=False
             )
             if isinstance(stream, dict):
-                raise RuntimeError("Ollama returned a non-stream payload for a stream request.")
+                raise TypeError(
+                    "Ollama returned a non-stream payload for a stream request."
+                )
             try:
                 for data in stream:
                     if self._is_query_cancelled(request_id):
@@ -1571,6 +1964,14 @@ class AxiomLMApp(App):
             inference_badge = self._build_inference_badge(
                 stream_metrics,
                 time.monotonic() - stream_started,
+            )
+
+            self.call_from_thread(
+                self._set_turn_evidence,
+                request_id,
+                accumulated_response,
+                book_stem,
+                metadatas,
             )
 
             # Post-process for math rendering
@@ -1615,12 +2016,12 @@ class AxiomLMApp(App):
             if exc.response.status_code == 404:
                 detail = (
                     f"Model '{model_name}' was not found in Ollama. "
-                    "Select an installed model from the sidebar and retry."
+                    "Use /models and /model to select an installed model."
                 )
             else:
                 detail = f"Ollama request failed ({exc.response.status_code}): {exc.response.reason_phrase}"
             self.call_from_thread(self._finalize_query, request_id, detail, query, True)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             if self._is_query_cancelled(request_id):
                 self.call_from_thread(self._finalize_query_cancelled, request_id)
                 return
@@ -1635,7 +2036,6 @@ class AxiomLMApp(App):
 
     def _is_query_cancelled(self, request_id: str) -> bool:
         return request_id in self._cancelled_query_ids
-
 
     def _iter_display_chunks(self, response: str) -> list[str]:
         if not response:
@@ -1673,225 +2073,26 @@ class AxiomLMApp(App):
             total_seconds = elapsed_seconds
 
         if tokens_per_second is not None and total_seconds is not None:
-            return f"[ ⚡ {tokens_per_second:.1f} tokens/sec | ⏱️ {total_seconds:.1f}s total ]"
+            return (
+                f"[ {tokens_per_second:.1f} tokens/sec · {total_seconds:.1f}s total ]"
+            )
         if tokens_per_second is not None:
-            return f"[ ⚡ {tokens_per_second:.1f} tokens/sec ]"
+            return f"[ {tokens_per_second:.1f} tokens/sec ]"
         if total_seconds is not None:
-            return f"[ ⏱️ {total_seconds:.1f}s total ]"
+            return f"[ {total_seconds:.1f}s total ]"
         return None
-
-    def _run_non_stream_completion(self, model_name: str, prompt: str) -> tuple[str, str | None]:
-        started = time.monotonic()
-        payload = OllamaClient().generate(
-            prompt, model=model_name, stream=False, think=False
-        )
-        if not isinstance(payload, dict):
-            raise RuntimeError("Ollama returned a stream for a non-stream request.")
-        completion = str(payload.get("response", "")).strip()
-        telemetry_badge = self._build_inference_badge(payload, time.monotonic() - started)
-        return completion, telemetry_badge
-
-    async def _stream_query_token(self, request_id: str, token: str) -> None:
-        assistant = self._pending_assistants.get(request_id)
-        if assistant is None or not assistant.is_attached:
-            return
-        assistant.stream_token(token)
-        self.query_one("#chat_scroll", ScrollableContainer).scroll_end(animate=False)
 
     def _fetch_ollama_models(self) -> list[str]:
         with Client(timeout=4.0) as client:
             response = client.get(f"{OLLAMA_URL}/api/tags")
             response.raise_for_status()
             payload = response.json()
-        models = [model.get("name") for model in payload.get("models", []) if model.get("name")]
+        models = [
+            model.get("name")
+            for model in payload.get("models", [])
+            if model.get("name")
+        ]
         return sorted(set(models))
-
-    def _refresh_models(self) -> None:
-        try:
-            models = self._fetch_ollama_models()
-            self._apply_model_options(models)
-        except Exception:
-            self._apply_model_options([])
-
-    def _apply_model_options(self, models: list[str]) -> None:
-        model_select = self.query_one("#model_select", Select)
-
-        if not models:
-            model_select.set_options([("Ollama unavailable", "__offline__")])
-            model_select.value = "__offline__"
-            model_select.disabled = True
-            self.selected_model = ""
-            self._set_header()
-            return
-
-        model_select.disabled = False
-        model_select.set_options([(model, model) for model in models])
-        preferred = self.selected_model if self.selected_model in models else models[0]
-        model_select.value = preferred
-        self.selected_model = preferred
-        self._set_header()
-
-    def _set_parse_controls_enabled(self, enabled: bool) -> None:
-        parse_button = self.query_one("#parse_pdf_btn", Button)
-        path_input = self.query_one("#pdf_path_input", Input)
-        mode_select = self.query_one("#ocr_mode_select", Select)
-        progress = self.query_one("#parse_progress", ProgressBar)
-        status_card = self.query_one("#parse_status_card", Vertical)
-
-        parse_button.disabled = not enabled
-        path_input.disabled = not enabled
-        mode_select.disabled = not enabled
-        parse_button.label = "Parse + Index" if enabled else "Parsing..."
-
-        if enabled:
-            if self._parse_progress_timer is not None:
-                self._parse_progress_timer.stop()
-                self._parse_progress_timer = None
-            progress.add_class("hidden")
-            progress.update(progress=0)
-            status_card.add_class("hidden")
-            self._parse_started_at = None
-            self._parse_target_progress = 0.0
-            self._parse_current_stage = "Idle"
-            self._parse_current_engine = "-"
-            self._parse_detail = ""
-            return
-
-        status_card.remove_class("hidden")
-        progress.remove_class("hidden")
-        progress.update(progress=1)
-        self._set_parse_runtime_status(
-            stage="Preparing parse job",
-            detail="Setting up OCR pipeline...",
-            target_progress=8.0,
-        )
-        self._parse_progress_timer = self.set_interval(0.35, self._tick_parse_progress)
-
-    def _format_duration(self, seconds: float) -> str:
-        total = max(0, int(seconds))
-        minutes, secs = divmod(total, 60)
-        hours, minutes = divmod(minutes, 60)
-        if hours > 0:
-            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-        return f"{minutes:02d}:{secs:02d}"
-
-    def _set_parse_runtime_status(
-        self,
-        stage: str | None = None,
-        engine: str | None = None,
-        detail: str | None = None,
-        target_progress: float | None = None,
-    ) -> None:
-        if stage is not None:
-            self._parse_current_stage = stage
-        if engine is not None:
-            self._parse_current_engine = engine
-        if detail is not None:
-            self._parse_detail = detail
-        if target_progress is not None:
-            self._parse_target_progress = max(0.0, min(100.0, target_progress))
-
-        stage_label = self.query_one("#parse_status_stage", Label)
-        engine_label = self.query_one("#parse_status_engine", Label)
-        eta_label = self.query_one("#parse_status_eta", Label)
-        detail_label = self.query_one("#parse_status_detail", Label)
-
-        stage_label.update(f"Stage: {self._parse_current_stage}")
-        engine_label.update(f"Engine: {self._parse_current_engine}")
-        detail_label.update(self._parse_detail)
-
-        if self._parse_started_at is None:
-            eta_label.update("ETA: estimating...")
-
-    def _tick_parse_progress(self) -> None:
-        if not self._is_parsing:
-            return
-
-        progress = self.query_one("#parse_progress", ProgressBar)
-        current = progress.progress if progress.progress is not None else 0
-        target = min(100.0, max(current, self._parse_target_progress))
-
-        if current < target:
-            step = max(0.2, (target - current) * 0.16)
-            current = min(target, current + step)
-            progress.update(progress=current)
-
-        eta_label = self.query_one("#parse_status_eta", Label)
-        if self._parse_started_at is None or current < 1:
-            eta_label.update("ETA: estimating...")
-            return
-
-        elapsed = max(0.1, time.monotonic() - self._parse_started_at)
-        remaining = max(0.0, (elapsed / current) * (100 - current))
-        eta_label.update(
-            f"Elapsed: {self._format_duration(elapsed)} · ETA: ~{self._format_duration(remaining)}"
-        )
-
-    async def _start_parse_and_index(self) -> None:
-        if self._is_parsing:
-            self.notify("A parse job is already running.", severity="warning")
-            return
-
-        path_input = self.query_one("#pdf_path_input", Input)
-        raw_path = path_input.value.strip()
-        if not raw_path:
-            self.notify("Enter a PDF path first.", severity="warning")
-            return
-
-        pdf_path = Path(raw_path).expanduser()
-        if not pdf_path.is_absolute():
-            pdf_path = (Path.cwd() / pdf_path).resolve()
-
-        if not pdf_path.exists() or not pdf_path.is_file():
-            self.notify("PDF file not found.", severity="error")
-            return
-        if pdf_path.suffix.lower() != ".pdf":
-            self.notify("Only .pdf files are supported.", severity="error")
-            return
-
-        workload_token = self._try_acquire_workload("ingest")
-        if workload_token is None:
-            self.notify("GPU work is busy with ingestion or generation. Try again when it finishes.", severity="warning")
-            return
-
-        mode_select = self.query_one("#ocr_mode_select", Select)
-        mode_value = str(mode_select.value) if mode_select.value and mode_select.value != Select.BLANK else "auto"
-
-        self._is_parsing = True
-        self._parse_workload_token = workload_token
-        self._parse_started_at = time.monotonic()
-        self._parse_target_progress = 8.0
-        self._set_parse_controls_enabled(False)
-        requested_engine = {
-            "auto": "Auto (choosing best engine...)",
-            "pymupdf4llm": "pymupdf4llm",
-            "marker": "Marker (8GB VRAM)",
-            "mineru": "MinerU",
-        }.get(mode_value, mode_value)
-        self._set_parse_runtime_status(
-            stage="Preparing parse job",
-            engine=requested_engine,
-            detail=f"Book: {pdf_path.name}",
-            target_progress=8.0,
-        )
-        await self._append_chat_widget(
-            AssistantMessage(f"Starting parse + index for `{pdf_path.name}` using `{mode_value}` mode.")
-        )
-
-        try:
-            self.run_worker(
-                lambda: self._parse_and_index_worker(str(pdf_path), mode_value, workload_token),
-                thread=True,
-                group="parse",
-                exclusive=True,
-                exit_on_error=False,
-            )
-        except Exception:
-            self._release_workload(workload_token)
-            self._parse_workload_token = None
-            self._is_parsing = False
-            self._set_parse_controls_enabled(True)
-            raise
 
     def _parse_and_index_worker(
         self, pdf_path: str, mode: str, workload_token: str
@@ -1908,7 +2109,6 @@ class AxiomLMApp(App):
                 self._set_parse_runtime_status,
                 stage="Releasing GPU memory",
                 detail="Unloading Ollama sessions to free VRAM before OCR.",
-                target_progress=12.0,
             )
             self._release_ollama_models()
 
@@ -1927,10 +2127,7 @@ class AxiomLMApp(App):
                     )
 
             use_gpu_for_embeddings = self._use_gpu_for_embeddings
-            if resolved_mode == "mineru":
-                use_gpu_for_embeddings = True
             gpu_note = self._gpu_runtime_note(use_gpu_for_embeddings)
-            total_pages = self._pdf_page_count(pdf)
             parse_env = self._build_parse_env(use_gpu_for_embeddings)
             engine_label = {
                 "pymupdf4llm": "pymupdf4llm",
@@ -1945,7 +2142,6 @@ class AxiomLMApp(App):
                 stage="Parsing PDF pages",
                 engine=engine_label,
                 detail=detail_base,
-                target_progress=20.0,
             )
 
             ocr_cmd = [
@@ -1958,33 +2154,9 @@ class AxiomLMApp(App):
                 "--mode",
                 resolved_mode,
             ]
-            ocr_progress_floor = 12.0
-            ocr_progress_ceiling = 90.0
-            last_ocr_progress = 20.0
-            page_line_pattern = re.compile(r"page\s+(\d{1,6})", flags=re.IGNORECASE)
 
             def on_ocr_output(line: str) -> None:
-                nonlocal last_ocr_progress
-                stripped = line.strip()
-                if not stripped:
-                    return
-
-                trimmed = stripped if len(stripped) <= 180 else f"{stripped[:177]}..."
-                progress = last_ocr_progress
-
-                page_match = page_line_pattern.search(stripped)
-                if page_match and total_pages > 0:
-                    page_idx = int(page_match.group(1))
-                    ratio = min(1.0, max(0.0, (page_idx + 1) / total_pages))
-                    progress = ocr_progress_floor + (ocr_progress_ceiling - ocr_progress_floor) * ratio
-                    progress = max(last_ocr_progress, progress)
-                    last_ocr_progress = progress
-
-                self.call_from_thread(
-                    self._set_parse_runtime_status,
-                    detail=f"{detail_base} | {trimmed}",
-                    target_progress=progress,
-                )
+                self.call_from_thread(self._ingest_output, "parse", line)
 
             ocr_log = logs_dir / f"{pdf.stem}_{run_stamp}_ocr.log"
             self._write_stage_log(ocr_log, ocr_cmd, parse_env, "")
@@ -2006,7 +2178,6 @@ class AxiomLMApp(App):
                 self._set_parse_runtime_status,
                 stage="Indexing chunks",
                 detail=f"Parsed {page_count} pages. Building embeddings... | {gpu_note}",
-                target_progress=96.0,
             )
             index_cmd = [
                 sys.executable,
@@ -2023,6 +2194,9 @@ class AxiomLMApp(App):
             index_code, index_output = self._run_external_job(
                 index_cmd,
                 env=parse_env,
+                on_output=lambda line: self.call_from_thread(
+                    self._ingest_output, "index", line
+                ),
                 live_log_path=index_log,
                 timeout_seconds=INDEX_TIMEOUT_SECONDS,
             )
@@ -2031,18 +2205,18 @@ class AxiomLMApp(App):
                     f"{self._format_external_failure('Indexing', index_code, index_output)} (log: {index_log})"
                 )
 
-            chunks = self._extract_indexed_chunk_count(index_output)
+            collection = get_collection(pdf.stem)
+            ensure_collection_ready(collection)
+            chunks = collection.count()
             if chunks <= 0:
-                try:
-                    chunks = get_collection(pdf.stem).count()
-                except Exception:
-                    chunks = 0
+                raise RuntimeError(
+                    "Index completed without usable chunks; retry /parse"
+                )
 
             self.call_from_thread(
                 self._set_parse_runtime_status,
                 stage="Finalizing",
                 detail=f"Indexed {chunks} chunks. Logs: {index_log.name}",
-                target_progress=100.0,
             )
             self.call_from_thread(
                 self._finish_parse_and_index,
@@ -2051,7 +2225,7 @@ class AxiomLMApp(App):
                 chunks,
                 "",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
             book_stem = Path(pdf_path).stem if pdf_path else ""
             self.call_from_thread(
@@ -2070,9 +2244,7 @@ class AxiomLMApp(App):
     def _is_mineru_available() -> bool:
         if importlib.util.find_spec("magic_pdf") is not None:
             return True
-        if importlib.util.find_spec("mineru") is not None:
-            return True
-        return False
+        return importlib.util.find_spec("mineru") is not None
 
     @staticmethod
     def _project_root() -> Path:
@@ -2087,8 +2259,10 @@ class AxiomLMApp(App):
         timeout_seconds: int | None = None,
     ) -> tuple[int, str]:
         with self._process_lock:
-            if self._process_shutdown_started:
-                raise RuntimeError("TUI is shutting down; refusing to start an external job.")
+            if self._process_shutdown_started or self._ingest_cancelled:
+                raise RuntimeError(
+                    "TUI is shutting down; refusing to start an external job."
+                )
             proc = subprocess.Popen(
                 command,
                 cwd=str(self._project_root()),
@@ -2122,7 +2296,7 @@ class AxiomLMApp(App):
             finally:
                 try:
                     proc.stdout.close()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
                 line_queue.put(None)
 
@@ -2149,7 +2323,9 @@ class AxiomLMApp(App):
 
                 wait_seconds = 0.5
                 if timeout_at is not None:
-                    wait_seconds = max(0.05, min(wait_seconds, timeout_at - time.monotonic()))
+                    wait_seconds = max(
+                        0.05, min(wait_seconds, timeout_at - time.monotonic())
+                    )
                 try:
                     line = line_queue.get(timeout=wait_seconds)
                 except Empty:
@@ -2237,20 +2413,20 @@ class AxiomLMApp(App):
     def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
         try:
             os.killpg(proc.pid, signal.SIGTERM)
-        except Exception:
+        except Exception:  # noqa: BLE001
             try:
                 proc.terminate()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
     @staticmethod
     def _kill_process_group(proc: subprocess.Popen[str]) -> None:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except Exception:
+        except Exception:  # noqa: BLE001
             try:
                 proc.kill()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
     @staticmethod
@@ -2305,22 +2481,10 @@ class AxiomLMApp(App):
     def _torch_cuda_available() -> bool:
         try:
             import torch
+
             return torch.cuda.is_available()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
-
-    @staticmethod
-    def _pdf_page_count(pdf_path: Path) -> int:
-        try:
-            import fitz
-        except Exception:
-            return 0
-
-        doc = fitz.open(str(pdf_path))
-        try:
-            return len(doc)
-        finally:
-            doc.close()
 
     @staticmethod
     def _nvidia_gpu_present() -> bool:
@@ -2332,7 +2496,7 @@ class AxiomLMApp(App):
                 check=False,
             )
             return probe.returncode == 0 and bool(probe.stdout.strip())
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     @staticmethod
@@ -2344,11 +2508,6 @@ class AxiomLMApp(App):
         if AxiomLMApp._nvidia_gpu_present():
             return "GPU requested but Torch is CPU-only (install CUDA torch wheel)"
         return "GPU requested but no CUDA GPU runtime detected"
-
-    @staticmethod
-    def _extract_indexed_chunk_count(output: str) -> int:
-        match = re.search(r"embedded\s+(\d+)\s+chunks", output, flags=re.IGNORECASE)
-        return int(match.group(1)) if match else 0
 
     @staticmethod
     def _format_external_failure(stage: str, returncode: int, output: str) -> str:
@@ -2383,296 +2542,10 @@ class AxiomLMApp(App):
         """Unload currently loaded Ollama models so OCR has free VRAM."""
         OllamaClient().unload_and_wait()
 
-    async def _finish_parse_and_index(
-        self, book_stem: str, page_count: int, chunk_count: int, error_message: str
-    ) -> None:
-        self._is_parsing = False
-        self._set_parse_controls_enabled(True)
 
-        if error_message:
-            guidance = ""
-            if "OutOfMemoryError" in error_message or "CUDA out of memory" in error_message:
-                guidance = " Free GPU VRAM and retry (close GPU-heavy apps / Ollama sessions)."
-            await self._append_chat_widget(
-                AssistantMessage(f"Parse/index failed: {error_message}.{guidance}".strip(), is_error=True)
-            )
-            return
-
-        await self._append_chat_widget(
-            AssistantMessage(
-                f"Done: parsed `{book_stem}` ({page_count} pages) and indexed {chunk_count} chunks."
-            )
-        )
-
-        await self._populate_sidebar()
-        if book_stem in self._book_labels:
-            self.active_collection_name = book_stem
-            book_list = self.query_one("#book_list", ListView)
-            for idx, item in enumerate(book_list.children):
-                if getattr(item, "id", None) == book_stem:
-                    book_list.index = idx
-                    break
-            self._refresh_book_labels()
-            self._set_header()
-        self.query_one("#query_input", QueryComposer).focus()
-
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.has_class("tune-btn"):
-            return
-
-        if event.button.has_class("book-delete-btn"):
-            event.stop()
-            current = event.button.parent
-            while current is not None and not isinstance(current, BookListRow):
-                current = current.parent
-            if isinstance(current, BookListRow):
-                self._prompt_delete_collection(current.book_stem)
-            return
-
-        if event.button.id == "refresh_models_btn":
-            self._refresh_models()
-            return
-
-        if event.button.id == "parse_pdf_btn":
-            await self._start_parse_and_index()
-
-    def action_delete_selected_book(self) -> None:
-        if not self.active_collection_name:
-            self.notify("No active book selected.", severity="warning")
-            return
-        self._prompt_delete_collection(self.active_collection_name)
-
-    async def _send_gpu_status(self, *, include_future_note: bool = False) -> None:
-        status = "enabled" if self._use_gpu_for_embeddings else "disabled"
-        if include_future_note:
-            self.notify(f"GPU embeddings {status}.", severity="information")
-            await self._append_chat_widget(
-                AssistantMessage(f"GPU embeddings {status} for future parse/index runs.")
-            )
-            return
-
-        self.notify(f"GPU embeddings are currently {status}.", severity="information")
-        await self._append_chat_widget(
-            AssistantMessage(f"GPU embeddings are currently {status}.")
-        )
-
-    async def _handle_chat_command(self, command_text: str) -> None:
-        command, _, arg = command_text.partition(" ")
-        command = command.strip().lower()
-        argument = arg.strip()
-
-        if command == "/gpu-parsing":
-            self._use_gpu_for_embeddings = not self._use_gpu_for_embeddings
-            await self._send_gpu_status(include_future_note=True)
-            return
-
-        if command == "/gpu-status":
-            await self._send_gpu_status()
-            return
-
-        if command != "/delete":
-            self.notify(
-                "Unknown command. Supported: /delete [book], /gpu-parsing, /gpu-status",
-                severity="warning",
-            )
-            return
-
-        target = argument or self.active_collection_name or ""
-        if not target:
-            self.notify("Usage: /delete [book]", severity="warning")
-            return
-
-        resolved, error = self._resolve_book_stem(target)
-        if not resolved:
-            self.notify(error, severity="warning")
-            return
-        self._prompt_delete_collection(resolved)
-
-    def _resolve_book_stem(self, raw: str) -> tuple[str | None, str]:
-        needle = raw.strip().lower()
-        if not needle:
-            return None, "Usage: /delete [book]"
-
-        stems = sorted(self._book_labels.keys())
-        if not stems:
-            return None, "No books indexed."
-
-        exact_matches = [
-            stem
-            for stem in stems
-            if stem.lower() == needle or self._format_book_name(stem).lower() == needle
-        ]
-        if exact_matches:
-            return exact_matches[0], ""
-
-        partial_matches = [
-            stem
-            for stem in stems
-            if needle in stem.lower() or needle in self._format_book_name(stem).lower()
-        ]
-        if len(partial_matches) == 1:
-            return partial_matches[0], ""
-        if len(partial_matches) > 1:
-            choices = ", ".join(self._format_book_name(stem) for stem in partial_matches[:4])
-            return None, f"Ambiguous book name. Matches: {choices}"
-        return None, f"Book not found: {raw}"
-
-    def _prompt_delete_collection(self, book_stem: str) -> None:
-        if self._active_query_worker is not None and self._active_query_worker.is_running:
-            self.notify("Cancel the running query before deleting a book.", severity="warning")
-            return
-        if self._is_parsing:
-            self.notify("Wait for parse/index to finish before deleting a book.", severity="warning")
-            return
-        if book_stem not in self._book_labels:
-            self.notify("Book is no longer available.", severity="warning")
-            return
-
-        book_name = self._format_book_name(book_stem)
-        chunk_count = self._book_counts.get(book_stem, 0)
-        estimated_size_mb = self._get_collection_size_mb(book_stem)
-        dialog = DeleteCollectionConfirm(book_name, chunk_count, estimated_size_mb)
-        self.push_screen(
-            dialog,
-            callback=lambda confirmed, stem=book_stem: self._handle_delete_confirm_result(stem, bool(confirmed)),
-        )
-
-    def _get_collection_size_mb(self, book_stem: str) -> float:
-        chunk_count = self._book_counts.get(book_stem)
-        if chunk_count is None:
-            try:
-                chunk_count = get_collection(book_stem).count()
-            except Exception:
-                chunk_count = 0
-        # Rough estimate: ~2KB per chunk including vector + metadata overhead.
-        return (chunk_count * 2.0) / 1024.0
-
-    def _handle_delete_confirm_result(self, book_stem: str, confirmed: bool) -> None:
-        if not confirmed:
-            return
-        self.run_worker(
-            lambda: self._delete_collection_worker(book_stem),
-            thread=True,
-            group="delete-collection",
-            exclusive=True,
-            exit_on_error=False,
-        )
-
-    def _delete_collection_worker(self, book_stem: str) -> None:
-        try:
-            deleted = delete_collection(book_stem)
-            self.call_from_thread(self._finalize_collection_delete, book_stem, deleted, "")
-        except Exception as exc:
-            detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
-            self.call_from_thread(self._finalize_collection_delete, book_stem, False, detail)
-
-    async def _finalize_collection_delete(self, book_stem: str, deleted: bool, error: str) -> None:
-        if error:
-            self.notify(f"Delete failed: {error}", severity="error")
-            return
-        if not deleted:
-            self.notify(f"Collection '{self._format_book_name(book_stem)}' was not found.", severity="warning")
-            await self._populate_sidebar()
-            self._set_header()
-            return
-
-        deleted_name = self._format_book_name(book_stem)
-        await self._populate_sidebar()
-        self._set_header()
-        self.query_one("#query_input", QueryComposer).focus()
-        self.notify(f"Deleted '{deleted_name}'.", severity="information")
-
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id != "model_select":
-            return
-
-        if event.value == Select.BLANK:
-            return
-        value = str(event.value)
-        if value in {"__loading__", "__offline__"}:
-            return
-        self.selected_model = value
-        self._set_header()
-
-    def _clear_query_state(self, request_id: str) -> None:
-        if request_id in self._cancelled_query_ids:
-            self._cancelled_query_ids.remove(request_id)
-        if self._active_query_request_id == request_id:
-            self._active_query_request_id = None
-            self._active_query_worker = None
-        if request_id in self._request_books:
-            self._request_books.pop(request_id, None)
-
-    async def _finalize_query_cancelled(self, request_id: str) -> None:
-        await self._finalize_assistant_message(request_id, "Query cancelled.", is_error=False)
-        self._clear_query_state(request_id)
-
-    async def _finalize_query_transient_error(self, request_id: str, message: str) -> None:
-        self.notify(message, severity="warning")
-        await self._finalize_assistant_message(request_id, message, is_error=True)
-        self._clear_query_state(request_id)
-
-    async def _finalize_query(
-        self,
-        request_id: str,
-        message: str,
-        query: str,
-        is_error: bool,
-        telemetry_badge: str | None = None,
-    ) -> None:
-        if not is_error:
-            book_stem = self._request_books.get(request_id, self.active_collection_name or "")
-            citation = self.build_citation(book_stem) if book_stem else ""
-            if citation and not message.rstrip().endswith(citation):
-                message = f"{message.rstrip()}\n\n{citation}"
-            self._conversation.append({"role": "user", "content": query})
-            self._conversation.append({"role": "assistant", "content": message})
-            
-            # Keep only the last 10 messages (approx 5 turns) for context
-            if len(self._conversation) > 10:
-                self._conversation = self._conversation[-10:]
-
-        await self._finalize_assistant_message(
-            request_id,
-            message,
-            is_error=is_error,
-            telemetry_badge=telemetry_badge,
-        )
-        self._clear_query_state(request_id)
-
-    async def _finalize_assistant_message(
-        self,
-        request_id: str,
-        message: str,
-        is_error: bool,
-        telemetry_badge: str | None = None,
-    ) -> None:
-        assistant = self._pending_assistants.pop(request_id, None)
-        if assistant is None or not assistant.is_attached:
-            await self._append_chat_widget(
-                AssistantMessage(message, is_error=is_error, telemetry_badge=telemetry_badge)
-            )
-            return
-        assistant.finalize(message, is_error=is_error, telemetry_badge=telemetry_badge)
-        self.query_one("#chat_scroll", ScrollableContainer).scroll_end(animate=False)
-
-    def _render_mascot(self) -> None:
-        try:
-            mascot_widget = self.query_one("#mascot_art", Static)
-        except Exception:
-            return
-
-        logo = (
-            " _______         __                    _____   _______ \n"
-            "|   _   |.--.--.|__|.-----.--------.  |     |_|   |   |\n"
-            "|       ||_   _||  ||  _  |        |  |       |       |\n" 
-            "|___|___||__.__||__||_____|__|__|__|  |_______|__|_|__|\n"
-        )
-        mascot_widget.update(Text(logo, style="bold ansi_cyan"))
-                                                         
 def main():
-    app = AxiomLMApp()
-    app.run()
+    AxiomLMApp().run()
+
 
 if __name__ == "__main__":
     main()
