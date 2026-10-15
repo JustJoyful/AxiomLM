@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 
 import httpx
@@ -37,11 +37,13 @@ class OllamaClient:
         *,
         base_url: str = OLLAMA_URL,
         transport: httpx.BaseTransport | None = None,
+        async_transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._transport = transport
+        self._async_transport = async_transport
         self._sleep = sleep
         self._monotonic = monotonic
 
@@ -107,6 +109,35 @@ class OllamaClient:
             for line in response.iter_lines():
                 if line:
                     yield json.loads(line)
+
+    async def astream_generate(
+        self, prompt: str, *, model: str = OLLAMA_MODEL, think: bool = False
+    ) -> AsyncIterator[JsonObject]:
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": True,
+            "think": think,
+            "options": self._options(),
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+        }
+        # Cold model startup may be silent; task cancellation closes the read directly.
+        timeout = httpx.Timeout(OLLAMA_REQUEST_TIMEOUT_SECONDS)
+        async with (
+            httpx.AsyncClient(
+                timeout=timeout, transport=self._async_transport, trust_env=False
+            ) as client,
+            client.stream(
+                "POST", f"{self.base_url}/api/generate", json=payload
+            ) as response,
+        ):
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line:
+                    data = json.loads(line)
+                    if data.get("error"):
+                        raise RuntimeError(str(data["error"]))
+                    yield data
 
     def chat(
         self,

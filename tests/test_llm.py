@@ -128,3 +128,17 @@ def test_stream_idle_timeout_is_distinct_from_nonstream_response_timeout():
         assert stream_client.timeout.read == config.OLLAMA_READ_TIMEOUT_SECONDS
     with client._http_client() as request_client:
         assert request_client.timeout.read == config.OLLAMA_REQUEST_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_async_stream_allows_cold_model_response_budget():
+    def handler(request):
+        assert (
+            request.extensions["timeout"]["read"]
+            == config.OLLAMA_REQUEST_TIMEOUT_SECONDS
+        )
+        return httpx.Response(200, text='{"response":"answer","done":true}\n')
+
+    client = OllamaClient(async_transport=httpx.MockTransport(handler))
+    chunks = [chunk async for chunk in client.astream_generate("question")]
+    assert chunks == [{"response": "answer", "done": True}]
