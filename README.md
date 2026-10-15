@@ -15,24 +15,24 @@ A terminal study assistant for STEM and computer science textbooks, powered by l
 
 ## Project status
 
-AxiomLM is preparing a phased overhaul. The working baseline parses PDFs, indexes books and answers questions through a Textual TUI. The roadmap below describes **planned work**, not shipped features. OCR/scanned-PDF processing is frozen; effort moves to model lifecycle, UI, retrieval, tools and evaluation.
+Phase 0 is accepted on the development host. The Phase 1 command-driven Textual interface is implemented in this checkout; controlled Kitty/Alacritty terminal and clipboard checks passed, while human key/drag/readability acceptance is still pending. The roadmap distinguishes later planned capabilities. OCR/scanned-PDF processing is frozen; effort moves to model lifecycle, UI, retrieval, tools and evaluation.
 
 Core inference stays local with no silent cloud API fallback. Once models/dependencies are downloaded, the current book chat path can run offline. Planned web search/fetch are explicit evidence tools and require internet. A separate manually triggered Ask cloud button is optional, last, and outside core routing.
 
 ## Available today
 
-- Textual terminal chat with local Ollama generation and model selection.
+- Command-driven Textual 8.2.6 study stream with live local Ollama output, cancellation and a one-question queue.
 - Per-book ChromaDB collections and Jina asymmetric retrieval embeddings.
 - Header/boundary-aware overlapping chunks with physical-page metadata.
-- Follow-up context reuse, page-aware queries and source cues; citations are not yet checked by an entailment model.
+- Follow-up retrieval, page-aware queries and metadata-derived source lists. These lists are retrieved evidence, not verified claim citations.
 - PDF engine selection, parse/index progress and resumable page checkpoints.
-- Response/code copy actions via the current `pyperclip` helper.
+- Seven built-in themes, settings-hidden retrieval controls, native selection, and `/copy` / `/copy code` via explicit clipboard transports.
 
 The configured target is **Qwen3.5-4B Q4_K_M**, using the exact Ollama tag `qwen3.5:4b-q4_K_M`. Phase 0 acceptance passed on the RTX 3050 6GB development machine: Ollama 0.40.4 tool-calling, GPU generation at the 4096-token context limit, unload, CUDA Jina ingestion/release, and CPU live-query placement have recorded evidence. The baseline comparison uses a retrospective reconstruction with truncated before answers, so answer-quality comparisons are directional. Maintainer-local status and evidence are recorded in PHASES.md and MEMORY.md; those files are not part of the public README distribution.
 
 ## Screenshots
 
-These show the current interface, before the planned overhaul.
+Historical screenshots of the previous interface; they do not depict the Phase 1 stream.
 
 ![Current AxiomLM chat interface](image-2.png)
 ![Current AxiomLM study response](image-1.png)
@@ -54,11 +54,35 @@ uv run --no-sync python -m src.tui
 
 `install.sh` delegates to `scripts/setup_env.sh`. Use `--cpu` for the pinned CPU Torch profile, `--no-model` to skip both the pinned Jina snapshot download and Ollama model pull, and `--dry-run` to inspect all setup commands without changing the environment. Normal setup downloads the configured Jina revision and pulls the configured Ollama model. The sync preserves separately installed optional OCR engines. Use `uv run --no-sync axiomlm` to launch the installed entry point. `pyproject.toml` declares dependencies and `uv.lock` pins their resolved versions; the installer uses `uv`'s cache rather than staging multi-gigabyte CUDA wheels in `/tmp`.
 
-The overhaul will require a tested pinned Textual 8.x release and GPU-capable ingest dependencies. Later phases add `wl-clipboard` for Wayland copying, Bubblewrap/cgroups v2/SymPy for execution, and Typst for PDFs. They are **planned prerequisites**, not capabilities enabled by this docs update.
+The UI requires a UTF-8 interactive terminal, at least 40×12 cells (80×24 recommended). Install `wl-clipboard` for Wayland copying. Textual is pinned to 8.2.6. Bubblewrap/cgroups v2/SymPy execution and Typst export remain later-phase work. Physical compatibility across terminal applications has not yet been accepted.
 
 ### Parse and query a book
 
-Enter an absolute PDF path in the TUI and select **Parse + Index**. Select the indexed book, then ask a question. Engine selection offers `auto`, `pymupdf4llm`, `mineru` and `marker`; heavy engines require their installed runtime and sufficient hardware. MinerU is installed separately when needed.
+Use commands in the prompt, then type a question:
+
+```text
+/parse "/absolute/path/数学 notes.pdf" --mode auto
+/books
+/book book
+/models
+/model qwen3.5:4b-q4_K_M
+```
+
+`/parse` accepts `--mode auto|pymupdf4llm|mineru|marker` and explicit degraded `--cpu-embeddings`. Heavy engines require their installed runtime and sufficient hardware. MinerU is installed separately. Parsing a previously indexed book replaces its collection; parsed checkpoints remain resumable.
+
+Enter sends; Shift+Enter, Alt+Enter or Ctrl+J inserts a newline. Up/Down recalls history at the first/last line. Ctrl+P opens commands; Tab completes without executing. Escape closes an overlay first, otherwise cancels active work or clears the draft. PgUp/PgDn scroll; End resumes following output. Ctrl+L or `/clear` clears the display when idle; `/new` also clears conversation. `/quit` or two idle Ctrl+C presses exits.
+
+While generating, one additional question can queue with its captured book/model; book/model changes and destructive clearing are blocked until work resolves. Cancel/error returns the queued question to the prompt. Client abort is distinct from server unload: new GPU work stays blocked until cleanup is confirmed.
+
+`/sources` expands retrieved page metadata; `/details` shows observed steps. `/copy` copies the last completed answer with raw LaTeX; `/copy code` copies the last fenced block without gutters or added indentation, preserving trailing blank lines. Optional positive `n` chooses the nth-last answer/block. Unsupported model footnotes and claim markers are removed; canonical refusals suppress continuation. Changed answer copies begin `[AxiomLM sanitized answer]`. Code remains exact. Wayland uses `wl-copy`; if it fails, an applicable native `xclip`/`xsel`/`pbcopy` transport is preferred over unacknowledged OSC 52. When only a terminal transport is available, the message says “OSC 52 copy requested” because terminal support cannot be confirmed. Controlled Wayland code/raw-LaTeX and Kitty OSC52 byte comparisons passed on the development host.
+
+### Themes and preferences
+
+`/theme` previews live; Enter keeps, Escape reverts. Built-ins: `terminal` (default), `mono`, `catppuccin-mocha`, `gruvbox-dark`, `nord`, `tokyo-night`, `paper`. `/accent cyan` selects an ANSI accent for terminal mode. Preferences live in `~/.config/axiomlm/config.toml`; custom theme TOML files live in `~/.config/axiomlm/themes/`. Saves preserve unrelated settings/comments atomically.
+
+`AXIOM_THEME` overrides the saved selection at startup; presence of `NO_COLOR` forces monochrome. `AXIOM_REDUCE_MOTION=1` or presence of `NO_MOTION` disables decorative motion. Terminal mode retains ANSI palette indexes; contrast depends on the terminal palette. Final Unicode math formatting waits until an active answer selection clears.
+
+`/help` lists commands. `/thinking`, `/web` and `/export` report their later-phase availability; these backends are not implemented. Practice and coverage-gap features remain planned.
 
 The CLI extraction/indexing path is:
 
@@ -85,7 +109,7 @@ Checkpoints are stored in `data/parsed_md/checkpoints/<book_stem>/page_NNNN.md`,
 
 ### Retrieval controls
 
-The current TUI exposes K (retrieval count) and D (distance cutoff). The current configured defaults are K=5 and D=1.5; consult `src/config.py` for changes. Lower distance admits closer matches; raising K adds context and generation cost. Phase 1 moves these controls behind settings; Phase 2 adds hybrid retrieval, and Phase 4 introduces the calibrated entailment gate/rank.
+Use `/settings`, `/k 5` (3–20) and `/d 1.5` (finite, nonnegative) for actual retrieval count and distance filtering. Defaults come from `src/config.py`. The labeled SICP comparison preserved accepted K=8 IDs; configured K=5 increased precision from 0.542 to 0.600 and reduced recall from 0.778 to 0.694 over three labeled answerable cases. Fresh stochastic answers still included unsupported claims and page-1 under-answering. These settings do not provide a quality guarantee. Hybrid retrieval and entailment verification remain Phases 2 and 4.
 
 ## Overhaul roadmap
 
@@ -94,7 +118,7 @@ Build in order. Detailed acceptance criteria are in the maintainer's local `PRD.
 | Phase | Planned outcome |
 | --- | --- |
 | **0 — Foundation** | Exact Qwen3.5-4B Q4_K_M tag/digest; verified Ollama tool round-trip; GPU ingest, explicit release, CPU queries; local inference boundary |
-| **1 — Textual UI** | One accent and stylesheet, less chrome, settings-hidden K/D, native 8.x interaction, terminal ANSI themes, per-code/math `wl-copy` |
+| **1 — Textual UI** | Implemented in checkout; human key/drag/readability acceptance pending |
 | **2 — Context** | Chapter/section metadata, 8192-token non-overlapping contextual blocks and late chunking, follow-up rewriting, BM25 + dense search, direct 5–8 chunk synthesis |
 | **3 — Tools** | Local search, web search/fetch, sandboxed Python, PDF/citation tool interfaces; warm SymPy worker, verified solve flow and honest failure |
 | **4 — Trust** | One sub-100M CPU entailment model for gate/rank and citation checks; labeled per-book evaluation |
@@ -109,10 +133,11 @@ Time-boxed floor: **Phases 0–2 plus the Phase 4 eval harness**. Begin labels/b
 ```text
 src/
   config.py          Runtime paths, models and tunable parameters
-  tui.py             Current Textual UI and query/ingest orchestration
+  tui.py             Textual app and query/ingest orchestration
+  ui/                Stream, commands, themes, rendering and one axiom.tcss
   db.py              ChromaDB and Jina embedding integration
   indexer.py         Current chunking, metadata and indexing
-  clipboard.py       Current response/code copy helper
+  clipboard.py       Explicit stdin/OSC 52 clipboard transports
   ocr.py             Frozen extraction entry point
   ocr_*.py           Frozen extraction engines
   checkpoint.py      Frozen per-page artifacts
@@ -130,13 +155,16 @@ AGENTS.md            Coding-agent entry point and commands
 When working in the maintainer's local workspace, read `AGENTS.md` and `RULES.md` before making changes. Those local documents, `PRD.md` and `ARCHITECTURE.md` are intentionally excluded from GitHub. The public phase summary above records the scope; contributors should confirm the applicable phase before implementation. Keep scope/status documentation aligned with actual code and preserve the frozen extraction pipeline. Runtime configuration belongs in `src/config.py`.
 
 ```bash
-uv run --no-sync --extra dev ruff check src/ scripts/
+uv run --no-sync pytest -q
+uv run --no-sync ruff check src/ui src/tui.py src/clipboard.py src/llm.py scripts/validate_tui_phase1.py tests/tui
+uv run --no-sync python scripts/validate_tui_phase1.py
+uv run --no-sync python scripts/validate_tui_workload.py
 uv run --no-sync --extra dev black --check src/
 uv run --no-sync python scripts/validate_page_metadata.py book
 uv run --no-sync python scripts/validate_page_querying.py book "sample question"
 ```
 
-The validation scripts require an indexed book. They check existing metadata/query behavior; they are not the planned labeled eval harness. Future pipeline changes require before/after retrieval precision/recall, citation accuracy and hallucination measurements. Use `type(scope): description` commit messages.
+The metadata validator requires an indexed book; the page-query validator checks parsing/citation and mounted TUI wiring offline. These checks cover the existing pipeline; they are not the planned labeled eval harness. Future pipeline changes require before/after retrieval precision/recall, citation accuracy and hallucination measurements. Use `type(scope): description` commit messages.
 
 ## License
 
