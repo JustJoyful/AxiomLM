@@ -134,14 +134,12 @@ def test_unconfirmed_generation_cleanup_keeps_admission_closed(monkeypatch):
 
     monkeypatch.setattr(tui, "OllamaClient", Client)
     monkeypatch.setattr(app, "execute_rag_query", lambda *_args: None)
-    notifications = []
     monkeypatch.setattr(app, "call_from_thread", lambda fn, *args: fn(*args))
-    monkeypatch.setattr(app, "notify", lambda message, **_kwargs: notifications.append(message))
     token = app._try_acquire_workload("generation")
     app._execute_rag_query_with_admission("q", "", "b", "m", "r", token)
     assert app._workload_coordinator.active_kind == "generation"
     assert app._try_acquire_workload("ingest") is None
-    assert notifications and "cleanup" in notifications[0].lower()
+    assert app.notices and "cleanup" in app.notices[0].lower()
 
 
 def test_external_job_setup_failure_terminates_and_untracks_child(tmp_path, monkeypatch):
