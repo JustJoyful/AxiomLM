@@ -1,0 +1,67 @@
+* { border: none; }
+Screen { background: $background; color: $foreground; layers: base overlay; }
+#surface { height: 1fr; }
+#header { height: 1; padding: 0 2; color: $text-muted; }
+#chat_scroll { height: 1fr; padding: 0 2; scrollbar-size-vertical: 1; }
+.home #chat_scroll { width: 100%; }
+#home { height: auto; margin: 2 0; align: center middle; }
+#logo { width: 100%; height: auto; text-align: center; color: $accent; text-style: bold; }
+#tagline { width: 100%; text-align: center; margin-top: 1; color: $text-muted; }
+#rule { height: 1; margin: 0 2; color: $text-muted; }
+#prompt_row { height: auto; min-height: 1; max-height: 8; padding: 0 2; }
+#prompt_glyph { width: 2; color: $accent; }
+QueryComposer#query_input {
+    width: 1fr; height: auto; min-height: 1; max-height: 8;
+    border: none; padding: 0; background: transparent;
+}
+QueryComposer#query_input:focus { border: none; }
+QueryComposer .text-area--cursor-line { background: transparent; }
+QueryComposer .text-area--cursor { background: $accent; color: $background; }
+#ghost { width: auto; color: $text-muted; }
+#condition { height: auto; max-height: 1; padding: 0 2; color: $text-muted; }
+#hint { height: 1; padding: 0 2; color: $text-muted; }
+#new_output { height: auto; max-height: 1; padding: 0 2; color: $text-muted; }
+#resize_warning { width: 1fr; height: 1fr; content-align: center middle; }
+.turn { height: auto; margin-bottom: 1; }
+.question { height: auto; margin-bottom: 1; }
+.tool-line, .citation { height: auto; color: $text-muted; }
+.notice { height: auto; margin-bottom: 1; }
+.failed { color: $warning; }
+.answer { height: auto; padding: 0; background: transparent; color: $foreground; }
+.answer MarkdownBlock { background: transparent; color: $foreground; border: none; }
+.answer MarkdownHeader {
+    margin: 1 0 0 0; padding: 0; text-style: bold; color: $foreground;
+    background: transparent; content-align: left middle;
+}
+.answer MarkdownH1, .answer MarkdownH2, .answer MarkdownH3, .answer MarkdownH4, .answer MarkdownH5, .answer MarkdownH6 {
+    color: $foreground; background: transparent; text-style: bold; border: none;
+}
+.answer MarkdownParagraph { margin: 0 0 1 0; }
+.answer .em { text-style: bold; }
+.answer .code_inline { background: transparent; color: $foreground; text-style: none; }
+.answer MarkdownFence { padding: 0 0 0 2; margin: 0 0 1 0; background: transparent; color: $foreground; }
+.answer MarkdownFence > Label { padding: 0; background: transparent; color: $foreground; }
+.answer MarkdownBlockQuote { padding: 0 2; background: transparent; border: none; }
+.answer MarkdownBullet { color: $foreground; }
+.answer MarkdownHorizontalRule { height: 1; margin: 0; padding: 0; border: none; }
+#overlay {
+    layer: overlay; overlay: screen; constrain: inside;
+    dock: bottom; margin: 0 2 4 2; width: 1fr;
+    height: auto; max-height: 10;
+    border: round $text-muted; padding: 0; background: $background; color: $foreground;
+}
+#overlay > .option-list--option { padding: 0 1; }
+#overlay > .option-list--option-highlighted { color: $accent; background: transparent; text-style: bold; }
+#overlay > .option-list--option-hover { background: transparent; }
+.stream-tail { position: absolute; width: 1; height: 1; color: $accent; }
+#ghost { max-width: 40%; text-overflow: ellipsis; }
+.home #prompt_row, .home #condition, .home #hint, .home #rule { width: 60; max-width: 100%; }
+#surface { align-horizontal: center; }
+.answer StudyEquation { padding: 0; }
+QueryComposer .text-area--selection { color: $background; background: $accent; }
+#prompt_glyph { text-style: bold; }
+Screen:nocolor .failed { text-style: reverse; }
+#stream_spacer { height: 1fr; min-height: 0; }
+.home #stream_spacer { display: none; }
+#chat_scroll, #overlay { scrollbar-size-vertical: 0; }
+QueryComposer { scrollbar-size-vertical: 0; }
