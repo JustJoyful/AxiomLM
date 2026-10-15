@@ -24,10 +24,10 @@ dependencies = [
     "transformers==4.57.6",
     "peft==0.19.1",
     "chromadb==1.5.8",
-    "textual==8.2.4",
+    "textual==8.2.6",
+    "tomlkit>=0.13,<1",
     "httpx==0.28.1",
-    "tqdm>=4.66.0",
-    "pyperclip>=1.8.2"
+    "tqdm>=4.66.0"
 ]
 
 [project.optional-dependencies]
@@ -42,7 +42,9 @@ cpu = [
 dev = [
     "black>=23.0",           # code formatting
     "ruff>=0.1",             # linting
-    "pytest>=7.0",           # testing
+    "pytest>=7.0",
+    "pytest-asyncio>=0.24",
+    "pytest-textual-snapshot>=1.1",           # testing
     "mypy>=1.0",             # type checking
 ]
 
@@ -72,5 +74,12 @@ explicit = true
 [project.scripts]
 axiomlm = "src.tui:main"
 
-[tool.setuptools]
-packages = ["src"]
+[tool.setuptools.packages.find]
+include = ["src", "src.*"]
+
+[tool.setuptools.package-data]
+"src.ui" = ["*.tcss"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
