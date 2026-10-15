@@ -98,3 +98,28 @@ def ensure_directories():
 
 # Auto-initialize on import so scripts don't crash on missing paths
 ensure_directories()
+
+# Terminal UI preferences and presentation budgets.
+UI_CONFIG_PATH = Path.home() / ".config/axiomlm/config.toml"
+UI_THEMES_DIR = Path.home() / ".config/axiomlm/themes"
+UI_FRAME_INTERVAL = 1 / 30
+UI_SCROLLBACK_BLOCKS = 2000
+UI_PROMPT_MAX_LINES = 8
+UI_OVERLAY_ROWS = 8
+UI_CLIPBOARD_TIMEOUT = 1.0
+UI_QUIT_CONFIRM_SECONDS = 1.0
+UI_BACKGROUND_TIMEOUT = 0.1
+UI_SPINNER_INTERVAL = 0.08
+UI_SHIMMER_INTERVAL = 0.06
+UI_SHIMMER_PAUSE = 0.6
+UI_COUNTER_INTERVAL = 0.1
+UI_BLINK_INTERVAL = 0.5
+UI_COMPLETION_FLASH_SECONDS = 0.12
+UI_COPY_CONFIRM_SECONDS = 2.0
+UI_RETRIEVAL_REPORT_PATH = LOGS_DIR / "phase1_retrieval_comparison.json"
+UI_CANCEL_TIMEOUT = 0.18
+UI_LIVE_REPORT_PATH = LOGS_DIR / "phase1_live_cancellation.json"
+UI_PROGRESS_WIDTH = 24
+UI_PROGRESS_EASING = 0.25
+UI_ACCEPTANCE_REPORT_PATH = LOGS_DIR / "phase1_tui_acceptance.json"
+UI_STYLESHEET_PATH = Path(__file__).parent / "ui/axiom.tcss"
