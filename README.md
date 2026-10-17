@@ -15,7 +15,7 @@ A terminal study assistant for STEM and computer science textbooks, powered by l
 
 ## Project status
 
-Phase 0 is accepted on the development host. The Phase 1 command-driven Textual interface is implemented in this checkout; controlled Kitty/Alacritty terminal and clipboard checks passed, while human key/drag/readability acceptance is still pending. The roadmap distinguishes later planned capabilities. OCR/scanned-PDF processing is frozen; effort moves to model lifecycle, UI, retrieval, tools and evaluation.
+Phases 0 and 1 are accepted on the development host. The command-driven Textual interface passed automated and Kitty/Alacritty checks on Niri/Wayland, including maintainer-reported physical key, drag-selection and readability checks. Later roadmap capabilities remain planned. OCR/scanned-PDF processing is frozen; work proceeds through retrieval, tools and evaluation.
 
 Core inference stays local with no silent cloud API fallback. Once models/dependencies are downloaded, the current book chat path can run offline. Planned web search/fetch are explicit evidence tools and require internet. A separate manually triggered Ask cloud button is optional, last, and outside core routing.
 
@@ -118,7 +118,7 @@ Build in order. Detailed acceptance criteria are in the maintainer's local `PRD.
 | Phase | Planned outcome |
 | --- | --- |
 | **0 — Foundation** | Exact Qwen3.5-4B Q4_K_M tag/digest; verified Ollama tool round-trip; GPU ingest, explicit release, CPU queries; local inference boundary |
-| **1 — Textual UI** | Implemented in checkout; human key/drag/readability acceptance pending |
+| **1 — Textual UI** | Accepted on Kitty 0.49.2 and Alacritty 0.17.0 on Niri/Wayland |
 | **2 — Context** | Chapter/section metadata, 8192-token non-overlapping contextual blocks and late chunking, follow-up rewriting, BM25 + dense search, direct 5–8 chunk synthesis |
 | **3 — Tools** | Local search, web search/fetch, sandboxed Python, PDF/citation tool interfaces; warm SymPy worker, verified solve flow and honest failure |
 | **4 — Trust** | One sub-100M CPU entailment model for gate/rank and citation checks; labeled per-book evaluation |
