@@ -179,14 +179,9 @@ async def validate() -> dict[str, Any]:
     )
     metrics["physical_terminal_checks"] = "not measured by headless diagnostic"
     metrics["missing_manual_evidence"] = [
-        "daily terminal and second terminal",
-        "three live terminal palettes",
-        "Wayland clipboard byte comparison",
-        "OSC52 without wl-clipboard",
-        "physical Shift+Enter and newline fallbacks",
-        "native drag auto-scroll",
-        "terminal focus reports",
-        "live theme preview keep/revert",
+        "human physical keypress confirmation in Kitty and Alacritty",
+        "native mouse selection with drag auto-scroll in both terminals",
+        "human NO_COLOR/reduced-motion readability confirmation in Alacritty",
     ]
     return metrics
 
