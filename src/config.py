@@ -47,6 +47,15 @@ OLLAMA_POLL_INTERVAL_SECONDS = 0.2
 OLLAMA_KEEP_ALIVE = 0
 RUNTIME_MANIFEST_PATH = LOGS_DIR / "runtime_manifest.json"
 FOUNDATION_REPORT_PATH = LOGS_DIR / "foundation_report.json"
+PHASE2_EVALUATION_PATH = LOGS_DIR / "phase2_context_evaluation.json"
+PHASE2_PROBE_PATH = LOGS_DIR / "phase2_planning_probe.json"
+EMBED_DIMENSION = 768
+PHASE2_CONTEXT_TOKEN_LIMIT = 8192
+PHASE2_BROAD_MAX_CHUNKS = 8
+PHASE2_PROBE_TOKEN_SIZES = (2048, 4096, 8192)
+QUERY_REWRITE_MAX_OUTPUT_TOKENS = 96
+QUERY_REWRITE_TIMEOUT_SECONDS = 15
+PHASE2_ANSWER_COUNT_CONTEXT_TOKENS = 8192
 TOOLS_REPORT_PATH = LOGS_DIR / "ollama_tools.json"
 FOUNDATION_VECTOR_STORE = DATA / "foundation_vector_store"
 INGEST_MIN_FREE_VRAM_MB = 2048
@@ -123,3 +132,9 @@ UI_PROGRESS_WIDTH = 24
 UI_PROGRESS_EASING = 0.25
 UI_ACCEPTANCE_REPORT_PATH = LOGS_DIR / "phase1_tui_acceptance.json"
 UI_STYLESHEET_PATH = Path(__file__).parent / "ui/axiom.tcss"
+
+# Task 1 isolated pooling validation; no production chunk/index semantics change.
+PHASE2_PROBE_CHUNK_TOKENS = 300
+PHASE2_GEOMETRY_REPORT_PATH = LOGS_DIR / "phase2_geometry_validation.json"
+PHASE2_VALIDATION_LABELS_PATH = ROOT / "tests/fixtures/phase2/sicp_pooling_validation_labels.json"
+PHASE2_VALIDATION_PROTOCOL_PATH = ROOT / "tests/fixtures/phase2/pooling_validation_protocol.json"
