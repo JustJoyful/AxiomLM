@@ -1,0 +1,260 @@
+{
+  "schema_version": 1,
+  "book_stem": "sicp",
+  "review": {
+    "reviewer": "Codex (agent)",
+    "date": "2026-10-18",
+    "method": "Agent inspected the extracted checkpoint text and physical-page manifest; maintainer review pending. No automatic relevance scorer was used; source inspection and labels were authored by the agent.",
+    "scope": "Curated sufficient evidence pages, not an exhaustive relevance judgment of all 883 pages.",
+    "prior_cases": "Preserves five Phase 1 questions. Broad scope is answerable from the book, even when retrieved title-only evidence is insufficient. Follow-up history is frozen for reproducible comparisons."
+  },
+  "source_pages": {
+    "1": "e8b9089776bfbdc067fe36a324f2255ef7d56b4386feb04df8e56d436fd67e3c",
+    "22": "de9bc259d411fb4f5cd32e70b9b3563f0effa56900a9663b4e38cf827a88595c",
+    "23": "302fe0a1ec2f1324edffd5feb85e96386fd3b9848ce5f284d122a3fa70f3057e",
+    "34": "4c092056839937f5e42c5ebbd8654ce0f059d470126cc1b60b253f8ab8deb65a",
+    "35": "b25b121237ca263fca7f7081e54557e256d1028279f23f20d7b4a42304ec6e07",
+    "36": "139618ed746472af40bc12eb7b11f78a81a7022d53887a1f43c80007445b8c84",
+    "37": "2a37c62c3366d48458244fec3d7129aeba5ffe6b201dc3a1f1d1210c37d2c7fe",
+    "38": "52849ce4260853fc4be8e0c9b41b0c502c75ec14bb883133bb8b7a675f33faee",
+    "39": "4a9f3137251d2ceaa420087bdc5155fd31c443aa6a17e5d65b2e77834d97ad16",
+    "135": "e5a6a3bada32d9b0568cca22bbc63f5ce6ffac4cd86adc3f5bbfda447e9b3666",
+    "136": "8a72bce2026b5351c2ec6367bb94b55f60b5bd42d3f3bc418efaa9c1e3fdc491",
+    "796": "96cdb8dc80ee4aa79cfd944672ce158bd7f1696ed919dede7b848f61bf8894fa",
+    "797": "79e954d8566db2409280d80af82e8fc67576ceb6ad6675d16b13927078514dc0",
+    "855": "4394973a42af100c6610a85e25f9d6ef63cf23429b1d096bb946d09981142b22"
+  },
+  "cases": [
+    {
+      "case_id": "interpreter",
+      "book_stem": "sicp",
+      "kind": "direct",
+      "question": "What is an interpreter?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        796,
+        797,
+        855
+      ],
+      "expected_claims": [
+        {
+          "claim": "An interpreter traverses a source program represented as a data structure and simulates it by calling primitive subroutines.",
+          "source_pages": [
+            796
+          ]
+        },
+        {
+          "claim": "Interpretation organizes execution in source-language abstractions and supports interactive development and debugging.",
+          "source_pages": [
+            797,
+            855
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "interpreter_example",
+      "book_stem": "sicp",
+      "kind": "followup",
+      "question": "Give another example of that.",
+      "history": [
+        {
+          "role": "user",
+          "content": "What is an interpreter?"
+        },
+        {
+          "role": "assistant",
+          "content": "An interpreter executes source programs by analyzing them and calling primitive procedures."
+        }
+      ],
+      "answerable": true,
+      "relevant_pages": [
+        35,
+        36,
+        37
+      ],
+      "expected_claims": [
+        {
+          "claim": "The Scheme interpreter evaluates an entered number such as 486 and displays the same number.",
+          "source_pages": [
+            35
+          ]
+        },
+        {
+          "claim": "The nearby discussion shows arithmetic combinations and nested expressions evaluated by the interpreter.",
+          "source_pages": [
+            36,
+            37
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "physical_page_one",
+      "book_stem": "sicp",
+      "kind": "page",
+      "question": "Summarize physical PDF page 1.",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        1
+      ],
+      "expected_claims": [
+        {
+          "claim": "Page 1 gives the SICP title, second-edition note, Harold Abelson and Gerald Jay Sussman with Julie Sussman, and Alan J. Perlis foreword credit.",
+          "source_pages": [
+            1
+          ]
+        },
+        {
+          "claim": "The parsed title page has an omitted image marker.",
+          "source_pages": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "book_scope",
+      "book_stem": "sicp",
+      "kind": "broad",
+      "question": "What is this book about?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        22,
+        23,
+        34,
+        135,
+        136
+      ],
+      "expected_claims": [
+        {
+          "claim": "The book teaches techniques for controlling complexity in software through abstraction, conventional interfaces, and languages.",
+          "source_pages": [
+            22,
+            23
+          ]
+        },
+        {
+          "claim": "It uses a Lisp dialect to develop procedural and data abstractions and modular decomposition.",
+          "source_pages": [
+            23
+          ]
+        },
+        {
+          "claim": "It develops mechanisms for combining and abstracting procedures and data.",
+          "source_pages": [
+            34,
+            135,
+            136
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "outside_book",
+      "book_stem": "sicp",
+      "kind": "unanswerable",
+      "question": "What was the weather in Kolkata yesterday?",
+      "history": [],
+      "answerable": false,
+      "relevant_pages": [],
+      "expected_claims": [
+        {
+          "claim": "State that the indexed SICP material does not provide enough evidence for the weather; do not invent weather facts.",
+          "source_pages": []
+        }
+      ]
+    },
+    {
+      "case_id": "interpreter_paraphrase",
+      "book_stem": "sicp",
+      "kind": "paraphrase",
+      "question": "How does an evaluator carry out a source-language program by invoking primitives on a machine?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        796,
+        855
+      ],
+      "expected_claims": [
+        {
+          "claim": "The interpreter analyzes a source-program data structure and invokes primitive subroutines implemented in the native language.",
+          "source_pages": [
+            796
+          ]
+        },
+        {
+          "claim": "It organizes execution in the abstractions of the source language.",
+          "source_pages": [
+            855
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "expressions_to_names",
+      "book_stem": "sicp",
+      "kind": "page_range",
+      "question": "Across physical PDF pages 37-39, how does the discussion move from nested expressions to naming values and the environment?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        37,
+        38,
+        39
+      ],
+      "expected_claims": [
+        {
+          "claim": "Nested prefix combinations can contain other combinations.",
+          "source_pages": [
+            37
+          ]
+        },
+        {
+          "claim": "The read-eval-print loop reads, evaluates, and prints; define associates a value with a name such as size.",
+          "source_pages": [
+            38
+          ]
+        },
+        {
+          "claim": "The environment is the memory that tracks name-object pairs and supports incremental program construction.",
+          "source_pages": [
+            39
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "procedures_and_data",
+      "book_stem": "sicp",
+      "kind": "broad_multi",
+      "question": "Compare the roles of procedure abstraction in Chapter 1 and compound-data abstraction at the start of Chapter 2.",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        34,
+        135,
+        136
+      ],
+      "expected_claims": [
+        {
+          "claim": "Chapter 1 combines primitive operations into compound procedures and uses define and higher-order procedures for abstraction.",
+          "source_pages": [
+            34,
+            135,
+            136
+          ]
+        },
+        {
+          "claim": "Chapter 2 combines primitive data into compound objects to raise the conceptual level, modularity, and expressive power of programs.",
+          "source_pages": [
+            136
+          ]
+        }
+      ]
+    }
+  ]
+}

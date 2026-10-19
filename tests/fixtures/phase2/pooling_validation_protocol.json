@@ -1,0 +1,14 @@
+{
+  "label_sha256": "05f2f985406d02247d823f7599ec976eb500b25dfe3e2f8e51436cd14cfda09b",
+  "methods": [
+    "mean",
+    "last",
+    "eos"
+  ],
+  "chunk_content_token_ceiling": 300,
+  "block_token_ceiling": 8192,
+  "k": 5,
+  "serialization": "One Document: prefix per block, EOS per chunk, two newlines between chunks; blocks stop at numbered section/chapter changes. Source chunks are contiguous, nonoverlapping, paragraph preferred, tokenizer offsets split oversized paragraphs.",
+  "gate": "Unchanged: controls 2/2, finite normalized 768D, 8192 float32 fit, GPU cleanup, validation macro page precision AND recall >= matched independent chunks. No selection or tuning on validation scores.",
+  "limitations": "Agent labels, small single-book validation; no claim-level quality or generalization acceptance."
+}

@@ -1,0 +1,33 @@
+{
+  "antecedents": [
+    "Git is a distributed version control system for source code.",
+    "A shared wiki is a collaborative encyclopedia maintained by article editors."
+  ],
+  "shared_span": "It keeps a detailed history of changes and supports collaboration.",
+  "control_queries": [
+    "What does Git do for source code?",
+    "What does a shared wiki track for its articles?"
+  ],
+  "contradiction": {
+    "case_id": "prefix_contradiction",
+    "book_stem": "sicp",
+    "kind": "contradiction",
+    "question": "Is it correct that Scheme's prefix notation places the operator to the right of its operands?",
+    "history": [],
+    "answerable": true,
+    "relevant_pages": [
+      36,
+      37
+    ],
+    "expected_claims": [
+      {
+        "claim": "No. Prefix notation places the operator to the left of the operands.",
+        "source_pages": [
+          36,
+          37
+        ]
+      }
+    ]
+  },
+  "review": "Codex agent inspected physical pages 36 and 37; supplemental contradiction case, not part of the frozen eight-case baseline."
+}

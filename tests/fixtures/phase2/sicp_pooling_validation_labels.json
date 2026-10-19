@@ -1,0 +1,275 @@
+{
+  "schema_version": 1,
+  "book_stem": "sicp",
+  "review": {
+    "reviewer": "Codex (agent)",
+    "date": "2026-10-19",
+    "method": "Checkpoint text inspected before geometry implementation or model scoring; maintainer review pending.",
+    "scope": "Separate held-out questions and source pages, disjoint from the original eight labels. Curated sufficient evidence, not exhaustive relevance."
+  },
+  "source_pages": {
+    "82": "8f0b4f972730a39dfb27958362c008cf248d56753907030ab0867649fdf6659f",
+    "102": "a509d85f39f8bf11679ecee923943822e2676a901e048af4c0003cebe1dca710",
+    "246": "54eb4e5c63664923f60d0bbc31fadab5deee117ce7f4ffd83ddd99dcc1a02839",
+    "283": "2fbb7f24d03ec414b4e4af0e39261f31ecb33a3f1f07070c877f8796c502c870",
+    "325": "2e658ccd162d1ff6b509a7e07a8817fdb6a00edd5537788f2b96068f3ec4e56b",
+    "339": "d22a4743f106de7c18b1b6f78e9b4a6967c1d3a50f85a926f98a778e5798be01",
+    "348": "e0fb19d1ba8bad785743f0b8897f85499ee11739cedf2ca5b9186fcaa60927f7",
+    "438": "de0a333a4958b8ebd42f32640e61da29b355ff87ab7e85f268ccbdbfab52347a",
+    "458": "a20fb93e3cdd1040996852b83036313c59ac14a3639655ead8591ed354dbe9f8",
+    "570": "1b64c2a681fbf295a3d39cf49f6850f3aee434c2643af83edac9965d1ecdd1c4",
+    "700": "4725fdde9ceecf174f4daf6314209f278f7603a94dbde4573bb92779dbf76d92",
+    "800": "50c761b699552e7c5baa43aee6373c606c3e8b4b8d0b99f621b78cfbf14c7f82"
+  },
+  "cases": [
+    {
+      "case_id": "validation_growth",
+      "book_stem": "sicp",
+      "kind": "direct",
+      "question": "What does order of growth measure as the inputs to a process become larger?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        82
+      ],
+      "expected_claims": [
+        {
+          "claim": "It gives a gross measure of computational resources as input size grows.",
+          "source_pages": [
+            82
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_higher_order",
+      "book_stem": "sicp",
+      "kind": "direct",
+      "question": "What do procedures abstract about compound numerical operations?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        102
+      ],
+      "expected_claims": [
+        {
+          "claim": "They describe compound operations independently of particular numbers.",
+          "source_pages": [
+            102
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_fixed_code",
+      "book_stem": "sicp",
+      "kind": "direct",
+      "question": "How many different characters can a seven-bit code distinguish?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        246
+      ],
+      "expected_claims": [
+        {
+          "claim": "Seven bits distinguish 128 characters.",
+          "source_pages": [
+            246
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_generic",
+      "book_stem": "sicp",
+      "kind": "direct",
+      "question": "How does generic arithmetic choose addition for ordinary, rational, and complex numbers?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        283
+      ],
+      "expected_claims": [
+        {
+          "claim": "Type tags dispatch generic operations to the appropriate arithmetic package.",
+          "source_pages": [
+            283
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_withdraw",
+      "book_stem": "sicp",
+      "kind": "direct",
+      "question": "Starting with 100 dollars, what does withdraw return for withdrawals of 25, 25, 60, and 15?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        325
+      ],
+      "expected_claims": [
+        {
+          "claim": "The results are 75, 50, Insufficient funds, and 35.",
+          "source_pages": [
+            325
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_assignment",
+      "book_stem": "sicp",
+      "kind": "contradiction",
+      "question": "Does introducing assignment leave the substitution model adequate? Explain.",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        339,
+        348
+      ],
+      "expected_claims": [
+        {
+          "claim": "Assignment makes the substitution model inadequate for local state.",
+          "source_pages": [
+            339,
+            348
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_interleavings",
+      "book_stem": "sicp",
+      "kind": "direct",
+      "question": "How many interleavings preserve the individual orders of two processes with three events each?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        438
+      ],
+      "expected_claims": [
+        {
+          "claim": "There are twenty interleavings.",
+          "source_pages": [
+            438
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_stream_cost",
+      "book_stem": "sicp",
+      "kind": "paraphrase",
+      "question": "Why can elegant sequence transformations with ordinary lists consume excessive memory and time?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        458
+      ],
+      "expected_claims": [
+        {
+          "claim": "Each transformation constructs and copies potentially huge data structures.",
+          "source_pages": [
+            458
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_lazy",
+      "book_stem": "sicp",
+      "kind": "direct",
+      "question": "Why does (try 0 (/ 1 0)) return 1 under lazy evaluation instead of raising a division error?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        570
+      ],
+      "expected_claims": [
+        {
+          "claim": "The second argument is never needed and is not evaluated.",
+          "source_pages": [
+            570
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_registers",
+      "book_stem": "sicp",
+      "kind": "direct",
+      "question": "What information describes the data paths in the textual register-machine language?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        700
+      ],
+      "expected_claims": [
+        {
+          "claim": "The registers and operations describe data paths.",
+          "source_pages": [
+            700
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_compiler",
+      "book_stem": "sicp",
+      "kind": "direct",
+      "question": "What does the compiler generate instead of the execution procedures made by the analyzed evaluator?",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        800
+      ],
+      "expected_claims": [
+        {
+          "claim": "It generates instruction sequences for a register machine.",
+          "source_pages": [
+            800
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_state_stream",
+      "book_stem": "sicp",
+      "kind": "broad_multi",
+      "question": "Compare modeling state with assignment and with stream processing.",
+      "history": [],
+      "answerable": true,
+      "relevant_pages": [
+        325,
+        339,
+        458
+      ],
+      "expected_claims": [
+        {
+          "claim": "Assignment uses changing local variables; streams can model state without mutable data and avoid assignment drawbacks.",
+          "source_pages": [
+            325,
+            339,
+            458
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "validation_absent",
+      "book_stem": "sicp",
+      "kind": "unanswerable",
+      "question": "What is the current temperature on Mars at the landing site of Perseverance?",
+      "history": [],
+      "answerable": false,
+      "relevant_pages": [],
+      "expected_claims": [
+        {
+          "claim": "The book cannot establish current Mars weather.",
+          "source_pages": []
+        }
+      ]
+    }
+  ]
+}
