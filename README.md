@@ -15,7 +15,7 @@ A terminal study assistant for STEM and computer science textbooks, powered by l
 
 ## Project status
 
-Phases 0 and 1 are accepted on the development host. The command-driven Textual interface passed automated and Kitty/Alacritty checks on Niri/Wayland, including maintainer-reported physical key, drag-selection and readability checks. Later roadmap capabilities remain planned. OCR/scanned-PDF processing is frozen; work proceeds through retrieval, tools and evaluation.
+Phases 0 and 1 are accepted on the development host. The command-driven Textual interface passed automated and Kitty/Alacritty checks on Niri/Wayland, including maintainer-reported physical key, drag-selection and readability checks. Phase 2 retrieval is implemented and evaluated; acceptance is withheld for a measured retrieval regression and pending claim review. Existing indexes remain in use until explicitly rebuilt. Tools/trust/study features remain planned. OCR/scanned-PDF processing is frozen.
 
 Core inference stays local with no silent cloud API fallback. Once models/dependencies are downloaded, the current book chat path can run offline. Planned web search/fetch are explicit evidence tools and require internet. A separate manually triggered Ask cloud button is optional, last, and outside core routing.
 
@@ -23,8 +23,8 @@ Core inference stays local with no silent cloud API fallback. Once models/depend
 
 - Command-driven Textual 8.2.6 study stream with live local Ollama output, cancellation and a one-question queue.
 - Per-book ChromaDB collections and Jina asymmetric retrieval embeddings.
-- Header/boundary-aware overlapping chunks with physical-page metadata.
-- Follow-up retrieval, page-aware queries and metadata-derived source lists. These lists are retrieved evidence, not verified claim citations.
+- Legacy indexes remain readable; explicit rebuilds use contextual chunks and versioned dense/BM25 pairs with physical-page spans.
+- Bounded follow-up rewriting, page-aware hybrid retrieval for rebuilt books, and metadata-derived source lists. These lists are retrieved evidence, not verified claim citations.
 - PDF engine selection, parse/index progress and resumable page checkpoints.
 - Seven built-in themes, settings-hidden retrieval controls, native selection, and `/copy` / `/copy code` via explicit clipboard transports.
 
@@ -68,7 +68,7 @@ Use commands in the prompt, then type a question:
 /model qwen3.5:4b-q4_K_M
 ```
 
-`/parse` accepts `--mode auto|pymupdf4llm|mineru|marker` and explicit degraded `--cpu-embeddings`. Heavy engines require their installed runtime and sufficient hardware. MinerU is installed separately. Parsing a previously indexed book replaces its collection; parsed checkpoints remain resumable.
+`/parse` accepts `--mode auto|pymupdf4llm|mineru|marker` and explicit degraded `--cpu-embeddings`. Heavy engines require their installed runtime and sufficient hardware. MinerU is installed separately. Parsing a previously indexed book builds a replacement version; previous versions and parsed checkpoints remain retained.
 
 Enter sends; Shift+Enter, Alt+Enter or Ctrl+J inserts a newline. Up/Down recalls history at the first/last line. Ctrl+P opens commands; Tab completes without executing. Escape closes an overlay first, otherwise cancels active work or clears the draft. PgUp/PgDn scroll; End resumes following output. Ctrl+L or `/clear` clears the display when idle; `/new` also clears conversation. `/quit` or two idle Ctrl+C presses exits.
 
@@ -97,7 +97,7 @@ Replace `book` with the PDF stem. Existing collection replacement is explicit:
 uv run --no-sync python -m src.indexer book --reindex
 ```
 
-Reindexing replaces that book's vector collection; retain the parsed page artifacts.
+Reindexing builds a dense/BM25 pair beside previous versions and activates it after validation. Parsed artifacts and previous versions remain intact until confirmed removal. Staged evaluation has recorded a retrieval regression; review the local evidence before migrating an important book.
 
 ### Existing OCR behavior (frozen)
 
@@ -109,7 +109,7 @@ Checkpoints are stored in `data/parsed_md/checkpoints/<book_stem>/page_NNNN.md`,
 
 ### Retrieval controls
 
-Use `/settings`, `/k 5` (3–20) and `/d 1.5` (finite, nonnegative) for actual retrieval count and distance filtering. Defaults come from `src/config.py`. The labeled SICP comparison preserved accepted K=8 IDs; configured K=5 increased precision from 0.542 to 0.600 and reduced recall from 0.778 to 0.694 over three labeled answerable cases. Fresh stochastic answers still included unsupported claims and page-1 under-answering. These settings do not provide a quality guarantee. Hybrid retrieval and entailment verification remain Phases 2 and 4.
+Use `/settings`, `/k 5` (3–15) and `/d 1.5` (finite, nonnegative) for actual retrieval count and distance filtering. Defaults come from `src/config.py`. The labeled SICP comparison preserved accepted K=8 IDs; configured K=5 increased precision from 0.542 to 0.600 and reduced recall from 0.778 to 0.694 over three labeled answerable cases. Fresh stochastic answers still included unsupported claims and page-1 under-answering. These settings do not provide a quality guarantee. Versioned hybrid retrieval is implemented under Phase 2 evaluation; entailment verification remains Phase 4.
 
 ## Overhaul roadmap
 
@@ -169,3 +169,6 @@ The metadata validator requires an indexed book; the page-query validator checks
 ## License
 
 MIT, as declared in `pyproject.toml`.
+
+
+Phase 2 local evaluation: `uv run --no-sync python scripts/validate_phase2_context.py sicp` uses a temporary index and writes a separate after-report, preserving the original baseline. It refuses to overwrite an existing after-report. Context budgeting is currently calibrated for the configured Qwen3.5 digest on Ollama 0.40.4; other model/runtime combinations require calibration. `/k` accepts 3–15, with 5–8 whole passages for broad queries when available.
