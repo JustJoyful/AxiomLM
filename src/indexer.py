@@ -9,13 +9,16 @@ inserts it iteratively into the ChromaDB Local Vector store.
 import argparse
 import json
 import re
-import sys
+import traceback
 
 import chromadb
 
-from src import checkpoint
+from src import checkpoint, config, db
 from src.config import CHUNK_OVERLAP, CHUNK_SIZE, PARSED_MD, VECTOR_STORE
 from src.db import get_collection, release_ingest_model
+from src.index_metadata import source_segments
+from src.index_store import build_index_version, list_books
+from src.late_chunking import embed_context_block, split_context_blocks
 from src.llm import OllamaClient
 
 TOKEN_TO_WORD_RATIO = 0.75
@@ -58,7 +61,7 @@ def _split_long_unit(unit: str, target_size: int) -> list[str]:
 
     parts: list[str] = []
     for start in range(0, len(words), target_size):
-        part = " ".join(words[start:start + target_size]).strip()
+        part = " ".join(words[start : start + target_size]).strip()
         if part:
             parts.append(part)
     return parts
@@ -68,7 +71,7 @@ def _tokens_to_overlap_words(token_count: int) -> int:
     """Convert configured token overlap into approximate word overlap."""
     if token_count <= 0:
         return 0
-    return max(1, int(round(token_count * TOKEN_TO_WORD_RATIO)))
+    return max(1, round(token_count * TOKEN_TO_WORD_RATIO))
 
 
 def _next_content_index(text: str, start: int) -> int:
@@ -86,7 +89,18 @@ def _sentence_split(paragraph: str) -> list[str]:
     if not text:
         return []
 
-    abbreviations = {"e.g.", "i.e.", "etc.", "mr.", "mrs.", "dr.", "vs.", "fig.", "eq.", "no."}
+    abbreviations = {
+        "e.g.",
+        "i.e.",
+        "etc.",
+        "mr.",
+        "mrs.",
+        "dr.",
+        "vs.",
+        "fig.",
+        "eq.",
+        "no.",
+    }
     boundaries: list[int] = []
 
     for idx, ch in enumerate(text):
@@ -105,9 +119,11 @@ def _sentence_split(paragraph: str) -> list[str]:
                 continue
 
             token_start = idx
-            while token_start > 0 and (text[token_start - 1].isalpha() or text[token_start - 1] == "."):
+            while token_start > 0 and (
+                text[token_start - 1].isalpha() or text[token_start - 1] == "."
+            ):
                 token_start -= 1
-            token = text[token_start:idx + 1].lower()
+            token = text[token_start : idx + 1].lower()
             if token in abbreviations:
                 continue
 
@@ -252,7 +268,9 @@ def validate_chunk_quality(chunks: list[str]) -> dict[str, int]:
     total_chunks = len(chunks)
     max_tokens = max(1, int(CHUNK_SIZE * 1.25))
     min_tokens = max(1, int(CHUNK_SIZE * 0.20))
-    oversized_chunks = sum(1 for chunk in chunks if _estimate_tokens(chunk) > max_tokens)
+    oversized_chunks = sum(
+        1 for chunk in chunks if _estimate_tokens(chunk) > max_tokens
+    )
     tiny_chunks = sum(1 for chunk in chunks if _estimate_tokens(chunk) < min_tokens)
 
     return {
@@ -262,7 +280,9 @@ def validate_chunk_quality(chunks: list[str]) -> dict[str, int]:
         "empty_chunks": sum(1 for chunk in chunks if not chunk.strip()),
         "oversized_chunks": oversized_chunks,
         "tiny_chunks": tiny_chunks,
-        "oversized_pct": int((oversized_chunks / total_chunks) * 100) if total_chunks else 0,
+        "oversized_pct": (
+            int((oversized_chunks / total_chunks) * 100) if total_chunks else 0
+        ),
         "tiny_pct": int((tiny_chunks / total_chunks) * 100) if total_chunks else 0,
     }
 
@@ -337,9 +357,15 @@ def _build_chunk_data_with_pages(
         page_sections = markdown_splitter.split_text(page_text)
         if page_sections:
             for split_doc in page_sections:
-                base_meta: dict[str, str | int] = dict(split_doc.metadata) if split_doc.metadata else {}
+                base_meta: dict[str, str | int] = (
+                    dict(split_doc.metadata) if split_doc.metadata else {}
+                )
                 for header_key in ("Header 1", "Header 2", "Header 3"):
-                    if header_key in base_meta and isinstance(base_meta[header_key], str) and base_meta[header_key]:
+                    if (
+                        header_key in base_meta
+                        and isinstance(base_meta[header_key], str)
+                        and base_meta[header_key]
+                    ):
                         last_headers[header_key] = base_meta[header_key]
                     elif header_key in last_headers:
                         base_meta[header_key] = last_headers[header_key]
@@ -432,86 +458,64 @@ def index_chunks_with_pages(
         release_ingest_model()
 
 
+def contextual_chunks(book_stem: str, *, allow_cpu_embeddings: bool = False):
+    """Contextualize under the caller's ingest admission; release every GPU owner."""
+    segments = source_segments(book_stem)
+    if not segments:
+        raise ValueError("No checkpoint pages found; run OCR first")
+    try:
+        blocks = split_context_blocks(
+            segments, db.get_ingest_model(allow_cpu=allow_cpu_embeddings)[0].tokenizer
+        )
+        chunks = []
+        for index, block in enumerate(blocks):
+            chunks.extend(
+                embed_context_block(
+                    block,
+                    db.get_ingest_model(allow_cpu=allow_cpu_embeddings),
+                    config.PHASE2_POOLING_METHOD,
+                )
+            )
+            print(f"Context blocks {index + 1}/{len(blocks)}", flush=True)
+        return chunks
+    except BaseException as exc:
+        # A failed model forward can otherwise retain GPU parameters in traceback frames.
+        traceback.clear_frames(exc.__traceback__)
+        raise
+    finally:
+        release_ingest_model()
+
+
 def index_book(
     book_stem: str,
     reindex: bool = False,
     *,
     allow_cpu_embeddings: bool = False,
+    root=VECTOR_STORE,
 ) -> int:
-    """
-    Parse a parsed full.md file, chunk it semantically using LangChain,
-    and index it via embeddings into ChromaDB.
-    
-    Args:
-        book_stem: The root stem of the book used as folder and collection identifier.
-        reindex:   If True, delete existing collection before indexing.
-        
-    Returns:
-        The total number of chunks embedded and stored in the database.
-    """
-    try:
-        from langchain_text_splitters import MarkdownHeaderTextSplitter
-    except ImportError as exc:
-        raise ImportError(
-            "LangChain text splitters are missing. Sync the project with `uv sync --extra cuda` (or `--extra cpu`)."
-        ) from exc
-
-    md_path = PARSED_MD / book_stem / "full.md"
-    if not md_path.exists():
-        print(f"Error: Could not find aggregated markdown at {md_path}")
-        print(f"       Did you run the OCR stage for '{book_stem}'?")
-        sys.exit(1)
-
-    if reindex:
-        if _delete_collection_if_exists(book_stem):
-            print(f"Deleted existing collection '{book_stem}'. Re-indexing from scratch...")
-        else:
-            print(f"No existing collection named '{book_stem}' found. Creating a new one...")
-
-    existing_count = _collection_doc_count(book_stem)
-    if existing_count > 0:
-        print(f"Error: Collection '{book_stem}' already contains {existing_count} chunks.")
-        print("       Re-run with --reindex to replace the existing index.")
-        sys.exit(1)
-
-    print(f"Reading {md_path.name} ...")
-
-    # 1. Structural splitter definition (used per-page)
-    print("Chunking by structural headers...")
-    headers_to_split_on = [
-        ("#", "Header 1"),
-        ("##", "Header 2"),
-        ("###", "Header 3"),
-    ]
-    markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
-
-    # 2. Semantic chunking with physical page metadata
-    print("Enforcing semantic boundary chunking with page metadata...")
-    chunk_data = _build_chunk_data_with_pages(book_stem, markdown_splitter)
-    if not chunk_data:
-        print(
-            f"Error: No checkpoint pages found for '{book_stem}'. "
-            "Run OCR first to generate per-page checkpoints."
+    """Build beside existing versions; activate only a complete dense/BM25 pair."""
+    if not reindex and book_stem in list_books(root=root):
+        raise ValueError(
+            f"Book '{book_stem}' already indexed; use --reindex to build a replacement"
         )
-        sys.exit(1)
-
-    total_chunks = len(chunk_data)
-    quality = validate_chunk_quality([chunk for chunk, _, _ in chunk_data])
-    print(f"Chunk quality: {quality}")
-    _enforce_chunk_quality(quality)
-    print(f"Produced {total_chunks} chunk segments. Getting DB Connection...")
-    return index_chunks_with_pages(
-        book_stem, chunk_data, allow_cpu_embeddings=allow_cpu_embeddings
-    )
+    chunks = contextual_chunks(book_stem, allow_cpu_embeddings=allow_cpu_embeddings)
+    build_index_version(book_stem, chunks, root=root)
+    return len(chunks)
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="AxiomLM Indexer — Chunk & Vectorize Markdown")
-    parser.add_argument("book_stem", type=str, help="The book stem identifier (e.g. 'book_title_cleaned')")
+    parser = argparse.ArgumentParser(
+        description="AxiomLM Indexer — Chunk & Vectorize Markdown"
+    )
+    parser.add_argument(
+        "book_stem",
+        type=str,
+        help="The book stem identifier (e.g. 'book_title_cleaned')",
+    )
     parser.add_argument(
         "--reindex",
         action="store_true",
-        help="Delete existing collection and re-index from scratch.",
+        help="Build and activate a replacement pair while retaining previous versions.",
     )
     parser.add_argument(
         "--allow-cpu-embeddings",
@@ -519,6 +523,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Explicitly allow degraded CPU embedding ingestion when CUDA is unavailable.",
     )
     return parser
+
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
@@ -532,7 +537,9 @@ def main(argv: list[str] | None = None) -> int:
         allow_cpu_embeddings=args.allow_cpu_embeddings,
     )
     print("=========================================")
-    print(f" Success! Embedded {chunks} chunks for '{args.book_stem}' into vector database.")
+    print(
+        f" Success! Embedded {chunks} chunks for '{args.book_stem}' into vector database."
+    )
     print("=========================================")
     return 0
 
