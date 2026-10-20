@@ -75,5 +75,26 @@ def strip_model_footnotes(text: str) -> str:
     text = re.sub(r"(?m)^\[\^\d+\]:[^\n]*\n?", "", text)
     text = re.sub(r"[ \t]*\[\^\d+\]", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    abstention = "The indexed material does not provide enough evidence to answer this question."
+    abstention = (
+        "The indexed material does not provide enough evidence to answer this question."
+    )
     return abstention if text.startswith(abstention) else text
+
+
+def physical_pages_for(metadata) -> tuple[int, ...]:
+    """Exact page sets for contextual chunks; old indexes retain single-page support."""
+    import json
+
+    value = metadata.get("physical_pages")
+    if value is None:
+        page = metadata.get("physical_page", metadata.get("page"))
+        if page is None:
+            return ()
+        value = [page]
+    elif isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, (list, tuple)) or any(
+        type(p) is not int or p < 1 for p in value
+    ):
+        raise ValueError("Invalid physical page provenance")
+    return tuple(sorted(set(value)))
