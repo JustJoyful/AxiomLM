@@ -43,8 +43,13 @@ from .config import (
 )
 from .llm import OllamaClient
 from .page_querying import build_citation as build_page_citation
+from .page_querying import (
+    collapse_page_ranges,
+    physical_pages_for,
+    strip_model_footnotes,
+)
 from .page_querying import extract_page_intent as parse_page_intent
-from .page_querying import strip_model_footnotes
+from .query_rewriting import ConversationExchange, rewrite_followup
 from .ui.commands import (
     COMMANDS,
     AxiomCommandProvider,
@@ -70,15 +75,15 @@ from .workloads import WorkloadCoordinator, WorkloadKind
 
 # Delay embedding/database imports until background discovery or retrieval.
 def list_collections():
-    from .db import list_collections as operation
+    from .index_store import list_books as operation
 
     return operation()
 
 
 def get_collection(book):
-    from .db import get_collection as operation
+    from .index_store import resolve_index
 
-    return operation(book)
+    return resolve_index(book).dense_collection
 
 
 def embed_query(query):
@@ -94,7 +99,7 @@ def ensure_collection_ready(collection):
 
 
 def delete_collection(book):
-    from .db import delete_collection as operation
+    from .index_store import delete_book_indexes as operation
 
     return operation(book)
 
@@ -165,6 +170,7 @@ class AxiomLMApp(App):
         self._last_retrieved_pages = []
         self._request_books = {}
         self._request_context = {}
+        self._request_exchanges = {}
         self._transport_closed = {}
         self._answer_streams = {}
         self._answer_flush_lock = asyncio.Lock()
@@ -886,6 +892,14 @@ class AxiomLMApp(App):
             self.top_k_results,
             self.distance_threshold,
         )
+        completed_history = self._conversation[-4:]
+        self._request_exchanges[request_id] = tuple(
+            ConversationExchange(question["content"], answer["content"], book)
+            for question, answer in zip(
+                completed_history[::2], completed_history[1::2], strict=True
+            )
+            if question["role"] == "user" and answer["role"] == "assistant"
+        )
         self._transport_closed[request_id] = asyncio.Event()
         self._query_workload_token = token
         self._active_query_request_id = request_id
@@ -937,10 +951,33 @@ class AxiomLMApp(App):
         try:
             if painted is not None:
                 await painted.wait()
+            rewrite_started = time.monotonic()
+            rewritten = await rewrite_followup(
+                query,
+                self._request_exchanges.get(request_id, ()),
+                book,
+                model=model,
+                client=client,
+            )
+            record.retrieval_query = rewritten.retrieval_query
+            if (
+                rewritten.applied
+                or rewritten.fallback_reason != "not an eligible follow-up"
+            ):
+                record.steps.append(
+                    f"↳ rewrite {'applied' if rewritten.applied else 'fallback'} · {time.monotonic()-rewrite_started:.1f}s · {rewritten.fallback_reason or rewritten.retrieval_query}"
+                )
             record.phase = "RETRIEVING"
             retrieval = asyncio.create_task(
                 asyncio.to_thread(
-                    self._prepare_query, query, history, book, k, distance
+                    self._prepare_query,
+                    query,
+                    history,
+                    book,
+                    k,
+                    distance,
+                    rewritten.retrieval_query,
+                    model,
                 )
             )
             prompt, metadata, pages, _ids = await asyncio.shield(retrieval)
@@ -948,6 +985,14 @@ class AxiomLMApp(App):
                 raise asyncio.CancelledError
             self._last_retrieved_pages = pages
             self._set_turn_evidence(request_id, "", book, metadata)
+            if any(meta.get("page_filter_fallback") == "True" for meta in metadata):
+                record.steps.append(
+                    "↳ no chunks found for requested pages · used semantic fallback"
+                )
+            for meta in metadata:
+                record.steps.append(
+                    f"↳ {meta.get('index_mode', 'dense')} · {meta.get('chunk_id', '?')} · dense {meta.get('dense_rank', '—')} / BM25 {meta.get('bm25_rank', '—')} · pages {meta.get('physical_pages', '[]')}"
+                )
             record.steps.append(
                 f"↳ search_local_index ✓ {len(metadata)} chunks · {time.monotonic()-started:.1f}s"
             )
@@ -1056,6 +1101,7 @@ class AxiomLMApp(App):
             self._pending_assistants.pop(request_id, None)
             self._request_books.pop(request_id, None)
             self._request_context.pop(request_id, None)
+            self._request_exchanges.pop(request_id, None)
             self._transport_closed.pop(request_id, None)
             self._answer_streams.pop(request_id, None)
             self._cancelled_query_ids.discard(request_id)
@@ -1232,7 +1278,7 @@ class AxiomLMApp(App):
                 value = int(arguments[0]) if name == "/k" else float(arguments[0])
                 if (
                     name == "/k"
-                    and not 3 <= value <= 20
+                    and not 3 <= value <= config.HYBRID_CANDIDATE_LIMIT
                     or name == "/d"
                     and (not math.isfinite(value) or value < 0)
                 ):
@@ -1477,6 +1523,7 @@ class AxiomLMApp(App):
                 page,
                 meta.get("chapter") or meta.get("Header 1"),
                 meta.get("section") or meta.get("Header 2"),
+                physical_pages_for(meta),
             )
             if source not in sources:
                 sources.append(source)
@@ -1765,7 +1812,96 @@ class AxiomLMApp(App):
         """
         return parse_page_intent(query)
 
-    def _prepare_query(self, query, history_str, book_stem, k, distance_threshold):
+    def _prepare_query(
+        self,
+        query,
+        history_str,
+        book_stem,
+        k,
+        distance_threshold,
+        retrieval_query=None,
+        model=None,
+        answer_token_counter=None,
+    ):
+        from .answer_tokens import load_answer_counter
+        from .hybrid_retrieval import retrieve_hybrid, select_context
+        from .index_store import resolve_index
+
+        index = resolve_index(book_stem)
+        retrieval_query = query if retrieval_query is None else retrieval_query
+        target = self.extract_page_intent(query)
+        page_filter = (min(target), max(target)) if target else None
+        candidates = retrieve_hybrid(
+            index,
+            retrieval_query,
+            page_filter,
+            config.HYBRID_DENSE_FETCH,
+            config.HYBRID_BM25_FETCH,
+            distance_threshold=distance_threshold,
+        )
+        fallback = bool(target and not candidates)
+        if fallback:
+            candidates = retrieve_hybrid(
+                index,
+                retrieval_query,
+                None,
+                config.HYBRID_DENSE_FETCH,
+                config.HYBRID_BM25_FETCH,
+                distance_threshold=distance_threshold,
+            )
+
+        def prompt_for(rows):
+            context = (
+                "\n\n".join(
+                    f"[{c.metadata.get('chapter', c.metadata.get('Header 1', 'Unknown Chapter'))} · {c.metadata.get('section', c.metadata.get('Header 2', 'Unknown Section'))} · p.{collapse_page_ranges(list(physical_pages_for(c.metadata)))}]\n{c.text}"
+                    for c in rows
+                )
+                or "No direct context retrieved from indexed files."
+            )
+            return PROMPT_TEMPLATE.format(
+                book=book_stem, history=history_str, context=context, question=query
+            )
+
+        counter = answer_token_counter or load_answer_counter(
+            model or self.selected_model
+        )
+        selected = select_context(
+            query,
+            candidates,
+            k,
+            lambda rows: counter(prompt_for(rows)),
+            config.OLLAMA_CONTEXT_TOKENS - config.OLLAMA_OUTPUT_TOKENS,
+        )
+        metadata = [
+            dict(
+                c.metadata,
+                chunk_id=c.chunk_id,
+                dense_rank=c.dense_rank if c.dense_rank is not None else "—",
+                bm25_rank=c.bm25_rank if c.bm25_rank is not None else "—",
+                dense_distance=(
+                    c.dense_distance if c.dense_distance is not None else "—"
+                ),
+                bm25_score=c.bm25_score if c.bm25_score is not None else "—",
+                index_mode=(
+                    "dense-only legacy · rebuild for hybrid"
+                    if index.legacy
+                    else "hybrid"
+                ),
+                page_filter_fallback=str(fallback),
+                index_version=index.version_id,
+            )
+            for c in selected
+        ]
+        return (
+            prompt_for(selected),
+            metadata,
+            sorted({p for c in selected for p in physical_pages_for(c.metadata)}),
+            [c.chunk_id for c in selected],
+        )
+
+    def _prepare_legacy_query(
+        self, query, history_str, book_stem, k, distance_threshold
+    ):
         # Augment retrieval query with history if it's vague/short
         retrieval_query = query
         vague_terms = {
@@ -1923,7 +2059,7 @@ class AxiomLMApp(App):
                 self.call_from_thread(self._finalize_query_cancelled, request_id)
                 return
 
-            prompt, metadatas, retrieved_pages, _ids = self._prepare_query(
+            prompt, metadatas, retrieved_pages, _ids = self._prepare_legacy_query(
                 query,
                 history_str,
                 book_stem,
