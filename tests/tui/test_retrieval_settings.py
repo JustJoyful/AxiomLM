@@ -18,7 +18,7 @@ def test_configured_count_and_distance_reach_actual_retrieval(monkeypatch):
     monkeypatch.setattr(tui, "embed_query", lambda _: [1.0])
     monkeypatch.setattr(tui, "get_collection", lambda _: Collection())
     monkeypatch.setattr(tui, "ensure_collection_ready", lambda _: None)
-    prompt, metadata, pages, ids = app._prepare_query(
+    prompt, metadata, pages, ids = app._prepare_legacy_query(
         "Describe interpreter evaluation strategies using concrete evidence",
         "",
         "book",

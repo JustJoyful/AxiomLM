@@ -8,6 +8,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from src.config import UI_SCROLLBACK_BLOCKS
+from src.page_querying import collapse_page_ranges
 from src.ui.render import StudyMarkdown, normalize_math, sanitize_answer
 
 
@@ -17,6 +18,7 @@ class SourceRef:
     physical_page: int | None = None
     chapter: str | None = None
     section: str | None = None
+    physical_pages: tuple[int, ...] = ()
 
     def label(self):
         return " · ".join(
@@ -25,7 +27,11 @@ class SourceRef:
                 self.book,
                 self.chapter,
                 self.section,
-                f"p. {self.physical_page}" if self.physical_page else None,
+                (
+                    f"p. {collapse_page_ranges(list(self.physical_pages))}"
+                    if self.physical_pages
+                    else f"p. {self.physical_page}" if self.physical_page else None
+                ),
             )
             if value
         )
@@ -44,6 +50,7 @@ class TurnRecord:
     sources: list[SourceRef] = field(default_factory=list)
     phase: str = "SUBMITTED"
     steps: list[str] = field(default_factory=list)
+    retrieval_query: str = ""
 
     def set_answer(self, raw):
         self.raw_answer = raw

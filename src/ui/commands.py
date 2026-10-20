@@ -32,7 +32,7 @@ COMMANDS = {
         ("/remove", "<book>", "Remove a book after confirmation", 1),
         ("/models", "", "Refresh installed models", 1),
         ("/model", "<name>", "Switch model", 1),
-        ("/k", "<n>", "Set retrieval count (3–20)", 1),
+        ("/k", "<n>", "Set retrieval count (3–15)", 1),
         ("/d", "<value>", "Set distance cutoff", 1),
         ("/thinking", "on|off|show", "Thinking controls", 3),
         ("/web", "on|off", "Web fallback", 3),
