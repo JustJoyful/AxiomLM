@@ -6,17 +6,17 @@ Nothing is hardcoded in other scripts. Everything imports from here.
 from pathlib import Path
 
 # ── Root paths ────────────────────────────────────────────────────────────────
-ROOT         = Path(__file__).parent.parent   # project root (axiom-lm/)
-DATA         = ROOT / "data"
-RAW_PDFS     = DATA / "raw_pdfs"
-CLEAN_IMGS   = DATA / "clean_images"
-PARSED_MD    = DATA / "parsed_md"
-CHECKPOINTS  = PARSED_MD / "checkpoints"
+ROOT = Path(__file__).parent.parent  # project root (axiom-lm/)
+DATA = ROOT / "data"
+RAW_PDFS = DATA / "raw_pdfs"
+CLEAN_IMGS = DATA / "clean_images"
+PARSED_MD = DATA / "parsed_md"
+CHECKPOINTS = PARSED_MD / "checkpoints"
 VECTOR_STORE = DATA / "vector_store"
-LOGS_DIR     = DATA / "logs"
+LOGS_DIR = DATA / "logs"
 
 # ── Ollama / LLM ──────────────────────────────────────────────────────────────
-OLLAMA_URL   = "http://localhost:11434"
+OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen3.5:4b-q4_K_M"
 
 # ── Ollama sampling / response style ──────────────────────────────────────────
@@ -39,7 +39,7 @@ EMBED_BATCH_SIZE = 8
 
 # Foundation budgets; measured by validate_foundation before phase acceptance.
 OLLAMA_CONTEXT_TOKENS = 4096
-OLLAMA_OUTPUT_TOKENS = 512
+OLLAMA_OUTPUT_TOKENS = 768
 OLLAMA_REQUEST_TIMEOUT_SECONDS = 120.0
 OLLAMA_READ_TIMEOUT_SECONDS = 5.0
 OLLAMA_UNLOAD_TIMEOUT_SECONDS = 20.0
@@ -60,9 +60,9 @@ TOOLS_REPORT_PATH = LOGS_DIR / "ollama_tools.json"
 FOUNDATION_VECTOR_STORE = DATA / "foundation_vector_store"
 INGEST_MIN_FREE_VRAM_MB = 2048
 # ── Chunking & retrieval ──────────────────────────────────────────────────────
-CHUNK_SIZE    = 800    # target tokens per chunk
-CHUNK_OVERLAP = 100    # overlap tokens between adjacent chunks
-TOP_K_RESULTS = 5      # top-k chunks retrieved per query (live-tunable in TUI)
+CHUNK_SIZE = 800  # target tokens per chunk
+CHUNK_OVERLAP = 100  # overlap tokens between adjacent chunks
+TOP_K_RESULTS = 5  # top-k chunks retrieved per query (live-tunable in TUI)
 
 # ChromaDB returns DISTANCE (lower = more similar), not similarity.
 # Loosened to 1.5 because Jina-v5-nano results often fall between 0.8 and 1.2.
@@ -77,15 +77,17 @@ MINERU_MIN_VRAM_GB = 4.5
 MINERU_BATCH_PAGES = 24
 # MinerU backend to try first; falls back to MINERU_BACKEND_FALLBACK on failure.
 # Options: pipeline | hybrid-auto-engine | vlm-auto-engine
-MINERU_BACKEND_PRIMARY  = "pipeline"
-MINERU_BACKEND_FALLBACK = "pipeline"   # kept identical; set to None to disable retry
+MINERU_BACKEND_PRIMARY = "pipeline"
+MINERU_BACKEND_FALLBACK = "pipeline"  # kept identical; set to None to disable retry
 # ISO 639-1 language hint passed to MinerU for better OCR accuracy.
 # Use "ch" for Chinese, "en" for English, etc. None = let MinerU decide.
 MINERU_LANG = "en"
 
 # ── OCR/index timeout guards (seconds) ───────────────────────────────────────────────────
 # Hard timeout to prevent hangs from freezing the TUI forever.
-PYMUPDF4LLM_OCR_TIMEOUT_SECONDS = 300    # fast CPU path; 300s is generous even for 1000-page PDFs
+PYMUPDF4LLM_OCR_TIMEOUT_SECONDS = (
+    300  # fast CPU path; 300s is generous even for 1000-page PDFs
+)
 MARKER_OCR_TIMEOUT_SECONDS = 3600
 MINERU_OCR_TIMEOUT_SECONDS = 1800
 INDEX_TIMEOUT_SECONDS = 1800
@@ -101,7 +103,15 @@ AUTO_OCR_SCANNED_PAGE_RATIO_THRESHOLD = 0.50
 
 def ensure_directories():
     """Ensure all required data directories exist on disk."""
-    for path in [DATA, RAW_PDFS, CLEAN_IMGS, PARSED_MD, CHECKPOINTS, VECTOR_STORE, LOGS_DIR]:
+    for path in [
+        DATA,
+        RAW_PDFS,
+        CLEAN_IMGS,
+        PARSED_MD,
+        CHECKPOINTS,
+        VECTOR_STORE,
+        LOGS_DIR,
+    ]:
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -136,5 +146,37 @@ UI_STYLESHEET_PATH = Path(__file__).parent / "ui/axiom.tcss"
 # Task 1 isolated pooling validation; no production chunk/index semantics change.
 PHASE2_PROBE_CHUNK_TOKENS = 300
 PHASE2_GEOMETRY_REPORT_PATH = LOGS_DIR / "phase2_geometry_validation.json"
-PHASE2_VALIDATION_LABELS_PATH = ROOT / "tests/fixtures/phase2/sicp_pooling_validation_labels.json"
-PHASE2_VALIDATION_PROTOCOL_PATH = ROOT / "tests/fixtures/phase2/pooling_validation_protocol.json"
+PHASE2_VALIDATION_LABELS_PATH = (
+    ROOT / "tests/fixtures/phase2/sicp_pooling_validation_labels.json"
+)
+PHASE2_VALIDATION_PROTOCOL_PATH = (
+    ROOT / "tests/fixtures/phase2/pooling_validation_protocol.json"
+)
+
+# Phase 2 versioned contextual retrieval.
+CONTEXT_BLOCK_MAX_TOKENS = PHASE2_CONTEXT_TOKEN_LIMIT
+RETRIEVAL_CHUNK_TOKENS = PHASE2_PROBE_CHUNK_TOKENS
+PHASE2_POOLING_METHOD = "mean"
+PHASE2_INDEX_SCHEMA = 2
+PHASE2_QUERY_POLICY = "named_retrieval_query"
+PHASE2_INDEX_MANIFEST_PATH = VECTOR_STORE / "active_indexes.json"
+PHASE2_BM25_DIR = VECTOR_STORE / "bm25"
+HYBRID_CANDIDATE_LIMIT = 15
+HYBRID_DENSE_FETCH = 30
+HYBRID_BM25_FETCH = 30
+HYBRID_FETCH_BATCH = 15
+HYBRID_MAX_FETCH = 100
+BROAD_CONTEXT_MIN_CHUNKS = 5
+BROAD_CONTEXT_MAX_CHUNKS = PHASE2_BROAD_MAX_CHUNKS
+PHASE2_AFTER_EVALUATION_PATH = LOGS_DIR / "phase2_context_after_evaluation.json"
+INDEX_WRITE_BATCH_SIZE = 100
+ANSWER_TOKENIZER_CACHE_SIZE = 1
+PHASE2_LABELS_DIR = ROOT / "tests/fixtures/phase2"
+PHASE2_STAGING_REPORT_DIR = LOGS_DIR / "phase2_context_artifacts"
+# Verified against the installed runtime's served prompt counts (think=False).
+ANSWER_TOKENIZER_MODEL_DIGEST = (
+    "d8b0f5e9760cd1682034f292d7ef72ec46f432149be0df7574bf2d6e92e38c04"
+)
+ANSWER_TOKENIZER_OLLAMA_VERSION = "0.40.4"
+ANSWER_PROMPT_PREFIX = "<|im_start|>user\n"
+ANSWER_PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
