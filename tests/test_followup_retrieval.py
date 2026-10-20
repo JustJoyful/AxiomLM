@@ -19,7 +19,9 @@ def test_page_fallback_is_safe_without_a_running_app(monkeypatch):
     monkeypatch.setattr(tui, "get_collection", lambda _: Collection())
     monkeypatch.setattr(tui, "ensure_collection_ready", lambda _: None)
     monkeypatch.setattr(tui, "embed_query", lambda _: [0.1])
-    prompt, _, pages, _ = app._prepare_query("Explain page 999", "", "book", 5, 1.5)
+    prompt, _, pages, _ = app._prepare_legacy_query(
+        "Explain page 999", "", "book", 5, 1.5
+    )
     assert "fallback evidence" in prompt
     assert pages == [7]
 

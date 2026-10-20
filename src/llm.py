@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -109,6 +110,35 @@ class OllamaClient:
             for line in response.iter_lines():
                 if line:
                     yield json.loads(line)
+
+    async def agenerate(
+        self, prompt: str, *, model: str, think: bool, num_predict: int, timeout: float
+    ) -> JsonObject:
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "think": think,
+            "stream": False,
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+            "options": {**self._options(), "num_predict": num_predict},
+        }
+        async with asyncio.timeout(timeout):
+            async with httpx.AsyncClient(
+                timeout=timeout, transport=self._async_transport, trust_env=False
+            ) as client:
+                response = await client.post(
+                    f"{self.base_url}/api/generate", json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+                if (
+                    not isinstance(data, dict)
+                    or data.get("error")
+                    or data.get("done") is not True
+                    or not isinstance(data.get("response"), str)
+                ):
+                    raise ValueError("Invalid or incomplete Ollama completion")
+                return data
 
     async def astream_generate(
         self, prompt: str, *, model: str = OLLAMA_MODEL, think: bool = False

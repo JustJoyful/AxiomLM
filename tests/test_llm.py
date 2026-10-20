@@ -23,7 +23,7 @@ def test_generate_uses_local_budget_and_keep_alive_zero():
     assert "think" not in payload
     assert payload["keep_alive"] == 0
     assert payload["options"]["num_ctx"] == 4096
-    assert payload["options"]["num_predict"] == 512
+    assert payload["options"]["num_predict"] == 768
 
 
 def test_generate_can_disable_qwen_thinking():
@@ -142,3 +142,53 @@ async def test_async_stream_allows_cold_model_response_budget():
     client = OllamaClient(async_transport=httpx.MockTransport(handler))
     chunks = [chunk async for chunk in client.astream_generate("question")]
     assert chunks == [{"response": "answer", "done": True}]
+
+
+@pytest.mark.asyncio
+async def test_async_nonstream_override_budget_and_total_deadline():
+    import asyncio
+    import json
+
+    seen = []
+
+    async def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200, json={"done": True, "response": "Standalone question?"}
+        )
+
+    client = OllamaClient(async_transport=httpx.MockTransport(handler))
+    assert (
+        await client.agenerate(
+            "rewrite", model="local", think=False, num_predict=96, timeout=15
+        )
+    )["done"]
+    assert (
+        seen[0]["options"]["num_predict"] == 96
+        and seen[0]["keep_alive"] == 0
+        and not seen[0]["stream"]
+    )
+
+    async def stalled(request):
+        await asyncio.Event().wait()
+
+    client = OllamaClient(async_transport=httpx.MockTransport(stalled))
+    with pytest.raises(TimeoutError):
+        await client.agenerate(
+            "q", model="local", think=False, num_predict=96, timeout=0.01
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [{"error": "runner failed"}, {"done": False, "response": "partial"}, ["bad shape"]],
+)
+async def test_async_completion_rejects_error_or_incomplete_json(body):
+    client = OllamaClient(
+        async_transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+    )
+    with pytest.raises(ValueError, match="completion"):
+        await client.agenerate(
+            "q", model="local", think=False, num_predict=96, timeout=15
+        )
