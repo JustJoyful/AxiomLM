@@ -157,7 +157,7 @@ def test_generation_failure_saves_partial_report_and_keeps_active_index(
         def _format_history(self):
             return ""
 
-        def _prepare_query(self, question, *_args):
+        def _prepare_legacy_query(self, question, *_args):
             assert db._CLIENT.path != active
             tui.embed_query(question)
             return "prompt", [{"physical_page": 1}], [1], ["id"]

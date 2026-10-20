@@ -117,7 +117,7 @@ def rewrite_check(case):
 def answer_check(app, case, book, k, count_prompt=False):
     app._conversation = list(case.get("history", []))
     started = time.monotonic()
-    prompt, metadata, pages, ids = app._prepare_query(
+    prompt, metadata, pages, ids = app._prepare_legacy_query(
         case["question"], app._format_history(), book, k, config.DISTANCE_THRESHOLD
     )
     row = {

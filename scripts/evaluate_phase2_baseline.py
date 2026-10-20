@@ -253,7 +253,7 @@ def run() -> dict:
 
                     started = time.monotonic()
                     with patch.object(tui, "embed_query", traced_embed):
-                        prompt, metadata, pages, ids = app._prepare_query(
+                        prompt, metadata, pages, ids = app._prepare_legacy_query(
                             case["question"],
                             app._format_history(),
                             labels["book_stem"],
