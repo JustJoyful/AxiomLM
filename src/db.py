@@ -15,11 +15,11 @@ NOTE on jina-embeddings-v5-text-nano:
 """
 
 from __future__ import annotations
+
 import gc
-from typing import List
 
 import chromadb
-from chromadb import EmbeddingFunction, Documents, Embeddings
+from chromadb import Documents, EmbeddingFunction, Embeddings
 from huggingface_hub import snapshot_download
 from sentence_transformers import SentenceTransformer
 
@@ -87,10 +87,14 @@ def get_ingest_model(*, allow_cpu: bool = False) -> SentenceTransformer:
             try:
                 free_bytes, total_bytes = torch.cuda.mem_get_info()
             except Exception as exc:
-                raise RuntimeError(f"Unable to inspect free CUDA VRAM before ingest: {exc}") from exc
+                raise RuntimeError(
+                    f"Unable to inspect free CUDA VRAM before ingest: {exc}"
+                ) from exc
             free_mb = free_bytes // (1024 * 1024)
             total_mb = total_bytes // (1024 * 1024)
-            print(f"Embedding ingest CUDA memory: {free_mb} MiB free / {total_mb} MiB total")
+            print(
+                f"Embedding ingest CUDA memory: {free_mb} MiB free / {total_mb} MiB total"
+            )
             if free_mb < INGEST_MIN_FREE_VRAM_MB:
                 raise RuntimeError(
                     f"Embedding ingest needs at least {INGEST_MIN_FREE_VRAM_MB} MiB free VRAM; "
@@ -124,6 +128,7 @@ def release_ingest_model() -> None:
 
 # ── Custom ChromaDB-compatible embedding function ─────────────────────────────
 
+
 class JinaV5DocumentEmbeddingFunction(EmbeddingFunction):
     """
     ChromaDB EmbeddingFunction that indexes chunks using jina-v5's
@@ -141,7 +146,7 @@ class JinaV5DocumentEmbeddingFunction(EmbeddingFunction):
         # it on reconnect — must be stable across sessions.
         return "jina_v5_retrieval"
 
-    def __call__(self, input: Documents) -> Embeddings:  # noqa: A002
+    def __call__(self, input: Documents) -> Embeddings:
         model = get_ingest_model(allow_cpu=self.allow_cpu)
         prefixed = [f"Document: {text}" for text in input]
         # Preserve the pinned model's configured prompt semantics while Phase 0
@@ -151,7 +156,9 @@ class JinaV5DocumentEmbeddingFunction(EmbeddingFunction):
         return vecs.tolist()
 
 
-def embed_query(query: str) -> List[float]:
+def embed_query(
+    query: str, *, prompt_policy: str = "legacy_document_query"
+) -> list[float]:
     """
     Embed a single user query using the 'Query: ' asymmetric prefix.
     Called by the TUI/RAG layer — NOT by the indexer.
@@ -159,13 +166,23 @@ def embed_query(query: str) -> List[float]:
     model = get_query_model()
     # Keep query-side prompt behavior aligned with collections built before
     # Phase 0; changing it without rebuilding those vectors would skew search.
-    vec = model.encode(f"Query: {query}", task="retrieval", convert_to_numpy=True)
+    if prompt_policy == "legacy_document_query":
+        vec = model.encode(f"Query: {query}", task="retrieval", convert_to_numpy=True)
+    elif prompt_policy == "named_retrieval_query":
+        vec = model.encode(
+            query, prompt_name="query", task="retrieval", convert_to_numpy=True
+        )
+    else:
+        raise ValueError(f"Unsupported query prompt policy: {prompt_policy}")
     return vec.tolist()
 
 
 # ── Collection helpers ────────────────────────────────────────────────────────
 
-def get_collection(book_stem: str, *, allow_cpu_ingest: bool = False) -> chromadb.Collection:
+
+def get_collection(
+    book_stem: str, *, allow_cpu_ingest: bool = False
+) -> chromadb.Collection:
     """Get or create the ChromaDB collection for a specific book."""
     client = _get_client()
     return client.get_or_create_collection(
@@ -209,5 +226,7 @@ def delete_collection(book_stem: str) -> bool:
         return True
     except chromadb.errors.NotFoundError:
         return False
-    except Exception as exc:  # pragma: no cover - defensive pass-through for Chroma internals
+    except (
+        Exception
+    ) as exc:  # pragma: no cover - defensive pass-through for Chroma internals
         raise RuntimeError(f"Failed to delete collection '{book_stem}': {exc}") from exc

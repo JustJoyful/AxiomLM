@@ -174,3 +174,18 @@ def test_partial_index_is_rejected_for_chat():
 
     with pytest.raises(RuntimeError, match="incomplete"):
         db.ensure_collection_ready(Collection())
+
+
+def test_query_policy_is_per_request_and_unknown_fails(monkeypatch):
+    monkeypatch.setattr(db, "_QUERY_MODEL", None)
+    monkeypatch.setattr(db, "SentenceTransformer", Encoder)
+    db.embed_query("question", prompt_policy="named_retrieval_query")
+    db.embed_query("question")
+    calls = db.get_query_model().inputs
+    assert calls[0] == (
+        "question",
+        {"prompt_name": "query", "task": "retrieval", "convert_to_numpy": True},
+    )
+    assert calls[1][0] == "Query: question" and "prompt_name" not in calls[1][1]
+    with pytest.raises(ValueError):
+        db.embed_query("question", prompt_policy="unknown")
