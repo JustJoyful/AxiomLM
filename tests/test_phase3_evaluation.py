@@ -95,7 +95,11 @@ def test_online_policy_follows_frozen_web_expectation():
         return after.policy_checks(case, row, web=True)["web_when_expected"]
 
     assert "no_web_while_off" not in after.policy_checks({}, used, web=True)
-    assert "web_when_expected" not in after.policy_checks({}, used, web=True)
+    # A missing label is visible: applicable, not passed, counted as missing.
+    missing = after.policy_checks({}, used, web=True)
+    assert "web_when_expected" in missing and missing["web_when_expected"] is None
+    summary = after.summarize([missing])["web_when_expected"]
+    assert summary == {"passed": 0, "applicable": 1, "missing_label": 1}
     assert ok(False, unused) and not ok(False, used)
     assert ok("only_when_enabled", used) and not ok("only_when_enabled", unused)
     failed = {**used, "verification": {"status": "unverified"}}
@@ -105,6 +109,19 @@ def test_online_policy_follows_frozen_web_expectation():
     assert not ok(
         "only_on_failure_when_enabled", {**failed, "stages": unused["stages"]}
     )
+
+
+def test_book_answerable_phase2_cases_default_to_no_web():
+    labels, cases = baseline.load_cases()
+    after.apply_web_expectations(labels, cases)
+    by_id = {c["case_id"]: c for c in cases}
+    assert by_id["outside_book"]["web_expected"] == "only_when_enabled"
+    for cid in ("interpreter", "interpreter_example", "procedures_and_data"):
+        assert by_id[cid]["web_expected"] is False
+    assert all("web_expected" in c for c in cases)
+    used = {"mode": "qa", "stages": ["classify", "local_search", "optional_web"]}
+    checks = after.policy_checks(by_id["interpreter_example"], used, web=True)
+    assert checks["web_when_expected"] is False
 
 
 def test_reports_refuse_overwrite(tmp_path):

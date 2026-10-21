@@ -67,7 +67,11 @@ POLICY_NAMES = (
 
 
 def policy_checks(case: dict, row: dict, *, web: bool = False) -> dict:
-    """Label-derived policy outcomes for one case; absent keys are not applicable."""
+    """Label-derived policy outcomes for one case; absent keys are not applicable.
+
+    Online, a case without ``web_expected`` records ``None`` so the missing
+    label counts as applicable-but-failed instead of silently not applicable.
+    """
     stages = row.get("stages", [])
     used_web = "optional_web" in stages
     checks = {
@@ -86,6 +90,8 @@ def policy_checks(case: dict, row: dict, *, web: bool = False) -> dict:
         elif expected == "only_on_failure_when_enabled":
             verified = (row.get("verification") or {}).get("status") == "verified"
             checks["web_when_expected"] = used_web != verified
+        else:
+            checks["web_when_expected"] = None
     expected = case.get("expected_stage_order")
     if expected:
         checks["stage_order"] = [s for s in stages if s in expected] == list(expected)
@@ -100,9 +106,24 @@ def summarize(policy: list[dict]) -> dict:
         name: {
             "passed": sum(1 for p in policy if p.get(name) is True),
             "applicable": sum(1 for p in policy if name in p),
+            "missing_label": sum(1 for p in policy if name in p and p[name] is None),
         }
         for name in POLICY_NAMES
     }
+
+
+def apply_web_expectations(labels: dict, cases: list[dict]) -> None:
+    """Phase 2 cases carry their web expectation on the frozen reference.
+
+    Cases named there get web only when enabled; the other book-answerable
+    Phase 2 cases are expected not to use the web. Labels are not edited.
+    """
+    named = labels["phase2_reference"].get("web_expected", {})
+    for case in cases:
+        if case["case_id"] in named:
+            case.setdefault("web_expected", "only_when_enabled")
+        elif case.get("source") == "phase2" and case.get("answerable") is True:
+            case.setdefault("web_expected", False)
 
 
 async def _run_case(case, book, client, sandbox, counter, web) -> dict:
@@ -283,10 +304,7 @@ def evaluate(book: str, *, baseline: Path, output: Path, web: bool = False) -> d
         labels, cases = load_cases()
         if labels["book_stem"] != book:
             raise ValueError("Labels are frozen for a different book")
-        # Phase 2 cases carry their web expectation on the frozen reference.
-        for case in cases:
-            if case["case_id"] in labels["phase2_reference"].get("web_expected", {}):
-                case.setdefault("web_expected", "only_when_enabled")
+        apply_web_expectations(labels, cases)
         report.update(identities(CODE))
         with tempfile.TemporaryDirectory(prefix="axiom-phase3-agent-") as temp:
             store = Path(temp) / "vector_store"
