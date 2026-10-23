@@ -289,11 +289,15 @@ def test_evidence_headers_hold_no_ids_or_placeholder_metadata():
     web = EvidenceRef("web:c:1", "web", "Racket 9.3", url="https://x.org", title="v9.3")
     text = evidence_text([legacy, paged, web])
     assert "[book excerpt · section: Variables, expressions and statements]" in text
-    assert "[book excerpt · pages 225-227]" in text
+    assert "[book excerpt · pp. 225-227]" in text
     assert "[web page: v9.3]" in text
     for leaked in ("chunk", "71", "Unknown", "p.?", "https://", "web:c", "Source"):
         assert leaked not in text
     assert "Cite" not in SYSTEM and "Do not write citations" in SYSTEM
+    assert "Name a section only if an evidence header shows it" in SYSTEM
+    assert "never call a page number a section" in SYSTEM
+    single = EvidenceRef("c", "book", "x", physical_pages=(523,))
+    assert "[book excerpt · p. 523]" in evidence_text([single])
 
 
 class LengthCounter:
