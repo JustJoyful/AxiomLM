@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from src import config
 from src import query_rewriting as rewrite
 
 
@@ -72,6 +73,7 @@ async def test_rewrite_preserves_original_and_only_uses_last_two_exchanges(
     assert result.retrieval_query == (output if applied else result.original_question)
     assert "PRIVATE OLD" not in calls[0][0]
     assert calls[0][1]["num_predict"] == 96 and calls[0][1]["timeout"] == 15
+    assert calls[0][1]["options"] == config.AGENT_JSON_OPTIONS
     assert calls[-1] == "unloaded"
 
 

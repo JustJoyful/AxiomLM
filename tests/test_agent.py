@@ -38,7 +38,16 @@ class Client:
         self.requests = []
 
     async def achat(
-        self, messages, *, model, tools, think, num_predict, timeout, on_chunk=None
+        self,
+        messages,
+        *,
+        model,
+        tools,
+        think,
+        num_predict,
+        timeout,
+        on_chunk=None,
+        options=None,
     ):
         self.requests.append(
             {
@@ -46,6 +55,7 @@ class Client:
                 "tools": tools,
                 "think": think,
                 "num_predict": num_predict,
+                "options": options,
             }
         )
         reply = self.replies.pop(0)
@@ -766,3 +776,29 @@ async def test_non_plain_value_uses_model_candidate_extraction():
         if "model_request" in r
     )
     assert sandbox.verified[0].candidate == "3*x**2 + 2"
+
+
+async def test_json_control_calls_are_greedy_and_final_keeps_configured_sampling():
+    from src import llm
+
+    client = Client(
+        [
+            {"content": '{"mode": "qa"}'},
+            {"content": '{"sufficient": true, "reason": "defined", "check": null}'},
+            {"content": "An interpreter runs programs."},
+        ]
+    )
+    await collect(
+        request=AgentRequest("r", "What is an interpreter?", "sicp", "m"),
+        client=client,
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c1", "An interpreter...", 796)], []),
+    )
+    route, assess, final = client.requests
+    assert route["options"] == assess["options"] == config.AGENT_JSON_OPTIONS
+    assert config.AGENT_JSON_OPTIONS["temperature"] == 0
+    assert "seed" in config.AGENT_JSON_OPTIONS
+    assert final["options"] is None
+    # With no override the payload carries the configured temperature.
+    assert llm.OllamaClient._options()["temperature"] == config.OLLAMA_TEMPERATURE

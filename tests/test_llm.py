@@ -310,3 +310,30 @@ async def test_chat_total_deadline_covers_silent_streams():
             num_predict=8,
             timeout=0.05,
         )
+
+
+async def test_per_call_options_override_sampling_only_for_that_request():
+    import json
+
+    seen = []
+
+    async def handler(request):
+        seen.append(json.loads(request.content)["options"])
+        if "messages" in json.loads(request.content):
+            body = json.dumps({"message": {"content": "x"}, "done": True})
+            return httpx.Response(200, content=body + "\n")
+        return httpx.Response(200, json={"done": True, "response": "Q?"})
+
+    client = OllamaClient(async_transport=httpx.MockTransport(handler))
+    greedy = {"temperature": 0, "seed": 7}
+    await client.agenerate(
+        "p", model="m", think=False, num_predict=9, timeout=5, options=greedy
+    )
+    chat = {"model": "m", "tools": None, "think": False, "num_predict": 9, "timeout": 5}
+    await client.achat([{"role": "user", "content": "q"}], **chat, options=greedy)
+    await client.achat([{"role": "user", "content": "q"}], **chat)
+    assert seen[0]["temperature"] == seen[1]["temperature"] == 0
+    assert seen[0]["seed"] == seen[1]["seed"] == 7
+    assert seen[0]["num_predict"] == 9 and seen[0]["num_ctx"]
+    assert seen[2]["temperature"] == OllamaClient._options()["temperature"]
+    assert "seed" not in seen[2]

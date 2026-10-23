@@ -112,7 +112,14 @@ class OllamaClient:
                     yield json.loads(line)
 
     async def agenerate(
-        self, prompt: str, *, model: str, think: bool, num_predict: int, timeout: float
+        self,
+        prompt: str,
+        *,
+        model: str,
+        think: bool,
+        num_predict: int,
+        timeout: float,
+        options: JsonObject | None = None,
     ) -> JsonObject:
         payload = {
             "model": model,
@@ -120,7 +127,11 @@ class OllamaClient:
             "think": think,
             "stream": False,
             "keep_alive": OLLAMA_KEEP_ALIVE,
-            "options": {**self._options(), "num_predict": num_predict},
+            "options": {
+                **self._options(),
+                "num_predict": num_predict,
+                **(options or {}),
+            },
         }
         async with asyncio.timeout(timeout):
             async with httpx.AsyncClient(
@@ -178,15 +189,23 @@ class OllamaClient:
         think: bool,
         num_predict: int,
         timeout: float,
+        options: JsonObject | None = None,
     ) -> AsyncIterator[JsonObject]:
-        """Stream native chat chunks under one total deadline, silent gaps included."""
+        """Stream native chat chunks under one total deadline, silent gaps included.
+
+        ``options`` overrides the configured sampling for this one request.
+        """
         payload: JsonObject = {
             "model": model,
             "messages": messages,
             "stream": True,
             "think": think,
             "keep_alive": OLLAMA_KEEP_ALIVE,
-            "options": {**self._options(), "num_predict": num_predict},
+            "options": {
+                **self._options(),
+                "num_predict": num_predict,
+                **(options or {}),
+            },
         }
         if tools:
             payload["tools"] = tools
@@ -235,6 +254,7 @@ class OllamaClient:
         num_predict: int,
         timeout: float,
         on_chunk: Callable[[JsonObject], None] | None = None,
+        options: JsonObject | None = None,
     ) -> JsonObject:
         """Aggregate one streamed turn; raw thinking/tool_calls are kept for replay."""
         content, thinking, calls, final = [], [], [], None
@@ -245,6 +265,7 @@ class OllamaClient:
             think=think,
             num_predict=num_predict,
             timeout=timeout,
+            options=options,
         ):
             message = chunk.get("message") or {}
             content.append(message.get("content") or "")

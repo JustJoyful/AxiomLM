@@ -193,7 +193,25 @@ def test_review_sheet_shows_the_rewrite():
         "policy": {"mode": True},
         "answer": "An example.",
     }
-    report = {"passed": True, "git_head": "abc", "rows": [row]}
+    report = {
+        "passed": True,
+        "git_head": "abc",
+        "sampling": after.sampling_record(),
+        "rows": [row],
+    }
     text = review.build(report, report, Path("after.json"), Path("online.json"))
-    assert "Retrieval query (rewritten): What is another example of an interpreter?" in text
+    assert '"temperature": 0.3' in text and "temperature 1" not in text
+    assert (
+        "Retrieval query (rewritten): What is another example of an interpreter?"
+        in text
+    )
     assert "web expected: False" in text
+
+
+def test_report_records_the_sampling_actually_sent():
+    from src import config
+
+    record = after.sampling_record()
+    assert record["final"]["temperature"] == config.OLLAMA_TEMPERATURE
+    assert record["json_calls"]["temperature"] == 0
+    assert record["json_calls"]["seed"] == config.AGENT_JSON_SEED

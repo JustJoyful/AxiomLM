@@ -39,11 +39,13 @@ from scripts.evaluate_phase3_baseline import (
     tree_identity,
 )
 from src import config
+from src.llm import OllamaClient
 
 CODE = (
     "src/agent.py",
     "src/chat_tokens.py",
     "src/llm.py",
+    "src/query_rewriting.py",
     "src/retrieval.py",
     "src/tools/protocol.py",
     "src/tools/registry.py",
@@ -109,6 +111,16 @@ def summarize(policy: list[dict]) -> dict:
             "missing_label": sum(1 for p in policy if name in p and p[name] is None),
         }
         for name in POLICY_NAMES
+    }
+
+
+def sampling_record() -> dict:
+    keys = ("temperature", "top_p", "seed")
+    final = OllamaClient._options()
+    json_calls = {**final, **config.AGENT_JSON_OPTIONS}
+    return {
+        "final": {k: final[k] for k in keys if k in final},
+        "json_calls": {k: json_calls[k] for k in keys if k in json_calls},
     }
 
 
@@ -296,6 +308,8 @@ def evaluate(book: str, *, baseline: Path, output: Path, web: bool = False) -> d
                 "online_path": "not evaluated: run again with --web",
             }
         ),
+        # What the chat payloads send; Modelfile defaults apply only to unset keys.
+        "sampling": sampling_record(),
         "answer_review": {
             "status": "unreviewed",
             "reviewer": None,

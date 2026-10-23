@@ -364,7 +364,15 @@ class _Run:
         return counted
 
     async def chat(
-        self, stage, messages, *, tools=None, think=False, reserve, on_token=None
+        self,
+        stage,
+        messages,
+        *,
+        tools=None,
+        think=False,
+        reserve,
+        on_token=None,
+        options=None,
     ):
         if self.model_requests >= config.AGENT_MAX_MODEL_REQUESTS:
             raise AgentLimit("Model request cap reached")
@@ -378,6 +386,7 @@ class _Run:
             num_predict=reserve,
             timeout=self.remaining(),
             on_chunk=on_token,
+            options=options,
         )
         self.trace.append(
             {
@@ -387,6 +396,9 @@ class _Run:
                 "served_tokens": turn.get("prompt_eval_count"),
                 "done_reason": turn.get("done_reason"),
                 "think": think,
+                "temperature": (options or {}).get(
+                    "temperature", config.OLLAMA_TEMPERATURE
+                ),
             }
         )
         return turn
@@ -550,6 +562,7 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
                     },
                 ],
                 reserve=config.AGENT_ROUTER_OUTPUT_TOKENS,
+                options=config.AGENT_JSON_OPTIONS,
             )
             try:
                 candidate = str(_json_reply(turn["message"]["content"])["candidate"])
@@ -625,6 +638,7 @@ async def run_agent(
                 },
             ],
             reserve=config.AGENT_ROUTER_OUTPUT_TOKENS,
+            options=config.AGENT_JSON_OPTIONS,
         )
         route = parse_route(turn["message"]["content"])
         if question_check(request.question) is not None:
@@ -676,6 +690,7 @@ async def run_agent(
             # (data/logs/phase3_agent/2026-10-26-throttled-01), so this stays off.
             think=False,
             reserve=config.AGENT_ROUTER_OUTPUT_TOKENS,
+            options=config.AGENT_JSON_OPTIONS,
         )
         assessment = parse_assessment(turn["message"]["content"], route.mode)
         yield AgentEvent(
