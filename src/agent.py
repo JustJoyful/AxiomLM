@@ -135,9 +135,13 @@ FINAL = (
     "limit."
 )
 QA_RULES = (
-    "Answer from the book evidence. If the question assumes something the "
-    "evidence contradicts, say so first and correct it. If the evidence does not "
-    "cover the question, say the book does not cover it{web_note}."
+    "Answer directly from the book evidence, starting with the answer; do not open "
+    "with remarks about what the evidence lacks. If a page is requested, summarize "
+    'what it contains, even a title page. For a follow-up ("that", "another"), '
+    "resolve what it refers to from the conversation and give an example from the "
+    "evidence. If the question assumes something false, say so, state what the book "
+    "actually says, and stop; do not invent reasons for the false premise. Say the "
+    "book does not cover the question only if no passage addresses it{web_note}."
 )
 SOLVE_RULES = (
     "The sandbox computation returned: {result}. Present that solution and its "
