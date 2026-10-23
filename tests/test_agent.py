@@ -802,3 +802,97 @@ async def test_json_control_calls_are_greedy_and_final_keeps_configured_sampling
     assert final["options"] is None
     # With no override the payload carries the configured temperature.
     assert llm.OllamaClient._options()["temperature"] == config.OLLAMA_TEMPERATURE
+
+
+def qa_script(sufficient=False):
+    return [
+        {"content": '{"mode": "qa"}'},
+        {"content": json.dumps({"sufficient": sufficient, "reason": "r"})},
+        {"content": "answer"},
+    ]
+
+
+async def test_requested_page_in_hand_skips_the_web_despite_the_flag():
+    web = Web()
+    _, last = await collect(
+        request=AgentRequest(
+            "r", "Summarize physical PDF page 1.", "sicp", "m", web_enabled=True
+        ),
+        client=Client(qa_script()),
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "Structure and Interpretation", 1)], []),
+        web=web,
+    )
+    assert web.calls == [] and "optional_web" not in last.data["stages"]
+    assert {"stage": "web_decision", "local_coverage": "requested pages retrieved"} in (
+        last.data["trace"]
+    )
+
+
+async def test_question_about_the_book_with_passages_skips_the_web():
+    web = Web()
+    await collect(
+        request=AgentRequest(
+            "r",
+            "Since the book says interpreters never evaluate expressions, why?",
+            "sicp",
+            "m",
+            web_enabled=True,
+        ),
+        client=Client(qa_script()),
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "An evaluator ...", 523)], []),
+        web=web,
+    )
+    assert web.calls == []
+
+
+async def test_web_query_is_the_rewritten_followup_not_the_raw_question():
+    web = Web()
+    query = "What are other examples of an interpreter in SICP?"
+    await collect(
+        request=AgentRequest(
+            "r",
+            "Give another example of that.",
+            "sicp",
+            "m",
+            web_enabled=True,
+            retrieval_query=query,
+        ),
+        client=Client(qa_script()),
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "unrelated", 630)], []),
+        web=web,
+    )
+    assert web.calls[0] == ("search", query)
+
+
+async def test_off_book_question_still_searches_the_web_with_no_book_name():
+    web = Web()
+    question = "What was the weather in Kolkata yesterday?"
+    await collect(
+        request=AgentRequest(
+            "r", question, "sicp", "m", web_enabled=True, retrieval_query=question
+        ),
+        client=Client(qa_script()),
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "streams", 300)], []),
+        web=web,
+    )
+    assert web.calls[0] == ("search", question)
+
+
+def test_rewritten_followup_without_the_book_name_gets_it_added():
+    from src.agent import web_query
+
+    request = AgentRequest(
+        "r", "And that?", "sicp", "m", retrieval_query="What is an evaluator?"
+    )
+    assert web_query(request) == "What is an evaluator? sicp"
+    assert web_query(AgentRequest("r", "Racket release?", "sicp", "m")) == (
+        "Racket release?"
+    )

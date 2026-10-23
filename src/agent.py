@@ -90,7 +90,9 @@ ASSESS = (
     '"sufficient" is true when the book evidence below lets you answer the question '
     "in substance, or correct a false premise in it, even if not word for word. It "
     "is false only when the evidence does not cover the topic or the question needs "
-    "facts newer than or outside the book.\n"
+    "facts newer than or outside the book. A passage that defines, describes or "
+    "demonstrates the asked concept is sufficient, and so is a page the question "
+    "names.\n"
     '"check" is independent of the evidence: it describes how to verify the answer '
     "mathematically. Give it whenever the question is, in one real variable, "
     "finding roots of an expression (kind substitution, expression = the expression "
@@ -139,6 +141,49 @@ SOLVE_RULES = (
     "Only call the answer verified if the status is 'verified'; otherwise say it "
     "is unverified or disputed and why."
 )
+
+
+_BOOK_REFERENCE = re.compile(
+    r"\b(?:the|this)\s+(?:text)?book\b|\b(?:chapter|section|exercise)s?\s+\d",
+    re.IGNORECASE,
+)
+
+
+def refers_to_book(text: str) -> bool:
+    """A deterministic sign that a question is about the book itself."""
+    return bool(text and (_BOOK_REFERENCE.search(text) or extract_page_intent(text)))
+
+
+def local_coverage(
+    request: AgentRequest, sources: list[EvidenceRef], sufficient: bool
+) -> str | None:
+    """Why book evidence answers the question without the web, or None.
+
+    The model's sufficiency flag is one signal; a question naming pages that
+    were retrieved, or naming the book, chapter or section with passages in
+    hand, is about the book itself and the web cannot answer it better.
+    """
+    book = [s for s in sources if s.kind == "book"]
+    pages = extract_page_intent(request.question)
+    if pages and any(set(s.physical_pages) & set(pages) for s in book):
+        return "requested pages retrieved"
+    if book and any(
+        refers_to_book(text) for text in (request.question, request.retrieval_query)
+    ):
+        return "question is about the book"
+    return "assessed sufficient" if sufficient else None
+
+
+def web_query(request: AgentRequest) -> str:
+    """The resolved question; a rewritten book follow-up also names the book."""
+    query = request.retrieval_query or request.question
+    if (
+        request.retrieval_query
+        and request.retrieval_query != request.question
+        and request.book_stem.lower() not in query.lower()
+    ):
+        query = f"{query} {request.book_stem}"
+    return query[: config.TOOL_QUERY_MAX_CHARS]
 
 
 def _json_reply(text: str) -> dict:
@@ -711,8 +756,10 @@ async def run_agent(
                 else:
                     computation, check_result = item
 
+        coverage = local_coverage(request, run.sources, assessment.sufficient)
+        run.trace.append({"stage": "web_decision", "local_coverage": coverage})
         needs_web = (solve and check_result.status != "verified") or (
-            not solve and not assessment.sufficient
+            not solve and coverage is None
         )
         web_note = ""
         if needs_web and request.web_enabled:
@@ -720,7 +767,7 @@ async def run_agent(
             searched = await run.tool(
                 "optional_web",
                 "web_search",
-                {"query": request.question[: config.TOOL_QUERY_MAX_CHARS]},
+                {"query": web_query(request)},
                 frozenset({"web_search"}),
             )
             hits = searched.data.get("results") or []
@@ -756,6 +803,7 @@ async def run_agent(
             f"{row['stage']}: {row.get('tool', 'model')} "
             f"{row.get('status', row.get('done_reason', ''))}"
             for row in run.trace
+            if "tool" in row or "model_request" in row
         ]
         if computation is not None:
             trace_lines.append(f"computation result: {computation.data.get('result')}")
