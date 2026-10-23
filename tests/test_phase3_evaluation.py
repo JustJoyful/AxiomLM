@@ -124,6 +124,42 @@ def test_book_answerable_phase2_cases_default_to_no_web():
     assert checks["web_when_expected"] is False
 
 
+async def test_run_case_records_the_followup_rewrite(monkeypatch):
+    from src import agent, query_rewriting
+    from src.agent import AgentEvent
+
+    async def rewrite(question, exchanges, book, *, model, client):
+        return query_rewriting.RewriteResult(
+            question, "What is another example of an interpreter?", True, None
+        )
+
+    seen = []
+
+    async def run(request, **kwargs):
+        seen.append(request.retrieval_query)
+        yield AgentEvent("error", {"message": "stop", "stages": [], "trace": []})
+
+    class Client:
+        def unload_and_wait(self):
+            pass
+
+    monkeypatch.setattr(query_rewriting, "rewrite_followup", rewrite)
+    monkeypatch.setattr(agent, "run_agent", run)
+    case = {
+        "case_id": "interpreter_example",
+        "kind": "followup",
+        "question": "Give another example of that.",
+        "history": [],
+    }
+    row = await after._run_case(case, "sicp", Client(), None, None, False)
+    assert row["rewrite"] == {
+        "applied": True,
+        "retrieval_query": "What is another example of an interpreter?",
+        "fallback_reason": None,
+    }
+    assert seen == ["What is another example of an interpreter?"]
+
+
 def test_reports_refuse_overwrite(tmp_path):
     output = tmp_path / "before.json"
     output.write_text("previous")
@@ -138,3 +174,26 @@ def test_after_refuses_incomplete_or_stale_baseline(tmp_path):
     with pytest.raises(ValueError):
         after.evaluate("sicp", baseline=stale, output=tmp_path / "after.json")
     assert not (tmp_path / "after.json").exists()
+
+
+def test_review_sheet_shows_the_rewrite():
+    from pathlib import Path
+
+    from scripts import review_phase3_agent as review
+
+    row = {
+        "case_id": "interpreter_example",
+        "kind": "followup",
+        "question": "Give another example of that.",
+        "rewrite": {
+            "applied": True,
+            "retrieval_query": "What is another example of an interpreter?",
+            "fallback_reason": None,
+        },
+        "policy": {"mode": True},
+        "answer": "An example.",
+    }
+    report = {"passed": True, "git_head": "abc", "rows": [row]}
+    text = review.build(report, report, Path("after.json"), Path("online.json"))
+    assert "Retrieval query (rewritten): What is another example of an interpreter?" in text
+    assert "web expected: False" in text

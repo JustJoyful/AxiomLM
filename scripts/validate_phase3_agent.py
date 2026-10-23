@@ -153,6 +153,11 @@ async def _run_case(case, book, client, sandbox, counter, web) -> dict:
         "case_id": case["case_id"],
         "kind": case["kind"],
         "question": case["question"],
+        "rewrite": {
+            "applied": rewritten.applied,
+            "retrieval_query": rewritten.retrieval_query,
+            "fallback_reason": rewritten.fallback_reason,
+        },
         "physical_pages": [],
     }
     stage_times = []
