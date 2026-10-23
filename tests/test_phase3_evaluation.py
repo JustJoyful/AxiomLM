@@ -137,6 +137,7 @@ async def test_run_case_records_the_followup_rewrite(monkeypatch):
 
     async def run(request, **kwargs):
         seen.append(request.retrieval_query)
+        assert request.today == row_today()
         yield AgentEvent("error", {"message": "stop", "stages": [], "trace": []})
 
     class Client:
@@ -158,6 +159,13 @@ async def test_run_case_records_the_followup_rewrite(monkeypatch):
         "fallback_reason": None,
     }
     assert seen == ["What is another example of an interpreter?"]
+    assert row["today"] == row_today()
+
+
+def row_today():
+    from datetime import datetime
+
+    return datetime.now().astimezone().date().isoformat()
 
 
 def test_reports_refuse_overwrite(tmp_path):

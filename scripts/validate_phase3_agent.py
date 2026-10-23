@@ -144,6 +144,7 @@ async def _run_case(case, book, client, sandbox, counter, web) -> dict:
     from src.tools.web import WebTools
 
     history = list(case["history"])
+    today = datetime.now().astimezone().date().isoformat()
     started = time.monotonic()
     rewritten = await rewrite_followup(
         case["question"],
@@ -160,11 +161,13 @@ async def _run_case(case, book, client, sandbox, counter, web) -> dict:
         history=tuple(history),
         web_enabled=web,
         retrieval_query=rewritten.retrieval_query,
+        today=today,
     )
     row = {
         "case_id": case["case_id"],
         "kind": case["kind"],
         "question": case["question"],
+        "today": today,
         "rewrite": {
             "applied": rewritten.applied,
             "retrieval_query": rewritten.retrieval_query,

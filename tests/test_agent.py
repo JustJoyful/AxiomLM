@@ -896,3 +896,20 @@ def test_rewritten_followup_without_the_book_name_gets_it_added():
     assert web_query(AgentRequest("r", "Racket release?", "sicp", "m")) == (
         "Racket release?"
     )
+
+
+async def test_system_message_carries_the_injected_date():
+    client = Client(qa_script(sufficient=True))
+    await collect(
+        request=AgentRequest(
+            "r", "What is an interpreter?", "sicp", "m", today="2026-10-26"
+        ),
+        client=client,
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "An interpreter", 796)], []),
+    )
+    assert all(
+        "Today's date is 2026-10-26." in r["messages"][0]["content"]
+        for r in client.requests
+    )
