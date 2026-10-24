@@ -124,6 +124,14 @@ def sampling_record() -> dict:
     }
 
 
+def select_cases(cases: list[dict], case_ids: list[str]) -> list[dict]:
+    """A labelled subset for stability reruns; unknown ids are an error."""
+    unknown = set(case_ids) - {c["case_id"] for c in cases}
+    if unknown:
+        raise ValueError(f"Unknown case ids: {sorted(unknown)}")
+    return [c for c in cases if c["case_id"] in case_ids]
+
+
 def apply_web_expectations(labels: dict, cases: list[dict]) -> None:
     """Phase 2 cases carry their web expectation on the frozen reference.
 
@@ -261,7 +269,7 @@ def _leftover_scopes() -> list[str]:
     return [line.split()[0] for line in out.splitlines() if line.strip()]
 
 
-async def _evaluate(report, cases, book, store, web):
+async def _evaluate(report, cases, book, store, web, repeat=1):
     from src import index_store
     from src.chat_tokens import load_chat_counter
     from src.llm import OllamaClient
@@ -278,14 +286,25 @@ async def _evaluate(report, cases, book, store, web):
             index_store, "resolve_index", lambda stem: resolve(stem, root=store)
         ):
             for case in cases:
-                row = await _run_case(case, book, client, sandbox, counter, web)
-                report["rows"].append(row)
-                print(f"{case['case_id']}: {row.get('stages')}", flush=True)
+                for attempt in range(repeat):
+                    row = await _run_case(case, book, client, sandbox, counter, web)
+                    if repeat > 1:
+                        row["attempt"] = attempt + 1
+                    report["rows"].append(row)
+                    print(f"{case['case_id']}: {row.get('stages')}", flush=True)
     finally:
         await sandbox.aclose()
 
 
-def evaluate(book: str, *, baseline: Path, output: Path, web: bool = False) -> dict:
+def evaluate(
+    book: str,
+    *,
+    baseline: Path,
+    output: Path,
+    web: bool = False,
+    case_ids: list[str] | None = None,
+    repeat: int = 1,
+) -> dict:
     before = json.loads(baseline.read_text())
     if before.get("status") != "complete" or before.get("labels_sha256") != digest(
         LABELS
@@ -327,11 +346,14 @@ def evaluate(book: str, *, baseline: Path, output: Path, web: bool = False) -> d
         if labels["book_stem"] != book:
             raise ValueError("Labels are frozen for a different book")
         apply_web_expectations(labels, cases)
+        if case_ids:
+            cases = select_cases(cases, case_ids)
+            report["case_subset"] = {"case_ids": case_ids, "repeat": repeat}
         report.update(identities(CODE))
         with tempfile.TemporaryDirectory(prefix="axiom-phase3-agent-") as temp:
             store = Path(temp) / "vector_store"
             shutil.copytree(config.VECTOR_STORE, store)
-            asyncio.run(_evaluate(report, cases, book, store, web))
+            asyncio.run(_evaluate(report, cases, book, store, web, repeat))
         rows = report["rows"]
         report["retrieval_metrics"] = {
             "after": page_metrics(cases, rows),
@@ -387,9 +409,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--web", action="store_true", help="grant web permission (online path)"
     )
+    parser.add_argument(
+        "--cases", nargs="+", help="only these case ids (a stability rerun)"
+    )
+    parser.add_argument("--repeat", type=int, default=1, help="runs per case")
     args = parser.parse_args()
     result = evaluate(
-        args.book, baseline=args.baseline, output=args.output, web=args.web
+        args.book,
+        baseline=args.baseline,
+        output=args.output,
+        web=args.web,
+        case_ids=args.cases,
+        repeat=args.repeat,
     )
     keys = (
         "status",

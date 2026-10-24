@@ -223,3 +223,11 @@ def test_report_records_the_sampling_actually_sent():
     assert record["final"]["temperature"] == config.OLLAMA_TEMPERATURE
     assert record["json_calls"]["temperature"] == 0
     assert record["json_calls"]["seed"] == config.AGENT_JSON_SEED
+
+
+def test_stability_reruns_select_labelled_cases_only():
+    _, cases = baseline.load_cases()
+    picked = after.select_cases(cases, ["sqrt_newton", "interpreter_example"])
+    assert [c["case_id"] for c in picked] == ["interpreter_example", "sqrt_newton"]
+    with pytest.raises(ValueError, match="Unknown case ids"):
+        after.select_cases(cases, ["sqrt_newton", "nope"])
