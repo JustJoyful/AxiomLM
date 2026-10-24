@@ -214,6 +214,7 @@ def test_review_sheet_shows_the_rewrite():
         in text
     )
     assert "web expected: False" in text
+    assert "- Lints (not gates): labelled pages not retrieved: [35, 36, 37]" in text
 
 
 def test_report_records_the_sampling_actually_sent():
@@ -231,3 +232,61 @@ def test_stability_reruns_select_labelled_cases_only():
     assert [c["case_id"] for c in picked] == ["interpreter_example", "sqrt_newton"]
     with pytest.raises(ValueError, match="Unknown case ids"):
         after.select_cases(cases, ["sqrt_newton", "nope"])
+
+
+def lint(answer, **row):
+    case = row.pop("case", {})
+    return after.answer_lints({"answer": answer, **row}, case)
+
+
+def test_lint_internal_terms():
+    found = lint("The sandbox trace from the local search tool says 3.")
+    assert found == [
+        "internal term: local search",
+        "internal term: sandbox",
+        "internal term: tool",
+        "internal term: trace",
+    ]
+    assert lint("An interpreter is a program.") == []
+
+
+def test_lint_page_number_used_as_section():
+    assert lint("See Section 523 and Section 1.3.4.") == [
+        "page as section: Section 523"
+    ]
+
+
+def test_lint_disclaimer_when_book_evidence_covers_the_question():
+    covered = {"assessment": {"sufficient": True}}
+    assert lint("The evidence does not contain an example.", **covered) == [
+        "disclaimer although the book evidence covers the question"
+    ]
+    case = {"relevant_pages": [35]}
+    assert lint("It does not cover this.", physical_pages=[35], case=case) == [
+        "disclaimer although the book evidence covers the question"
+    ]
+    assert lint("The book does not cover this.", physical_pages=[300]) == []
+
+
+def test_lint_unused_web_sources_on_a_no_web_case():
+    row = {"web_sources": ["https://a.org"], "case": {"web_expected": False}}
+    assert lint("An interpreter runs programs.", **row) == [
+        "web sources fetched but not used in the answer"
+    ]
+    assert lint("The web says an interpreter runs programs.", **row) == []
+
+
+def test_lint_reports_missed_labelled_pages():
+    case = {"relevant_pages": [796, 797, 855]}
+    assert lint("ok", physical_pages=[796], case=case) == [
+        "labelled pages not retrieved: [797, 855]"
+    ]
+
+
+def test_lints_never_change_passed():
+    import inspect
+
+    source = inspect.getsource(after.evaluate)
+    passed = source[source.index('report["passed"] = (') :]
+    passed = passed[: passed.index('report["finished_utc"]')]
+    assert "lint" not in passed

@@ -15,7 +15,7 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.evaluate_phase3_baseline import load_cases
-from scripts.validate_phase3_agent import apply_web_expectations
+from scripts.validate_phase3_agent import answer_lints, apply_web_expectations
 from src import config
 
 REVIEW_BOXES = (
@@ -24,7 +24,7 @@ REVIEW_BOXES = (
 )
 
 
-def _side(title: str, row: dict) -> list[str]:
+def _side(title: str, row: dict, case: dict) -> list[str]:
     out = [f"#### {title}", ""]
     a = row.get("assessment") or {}
     out.append(
@@ -47,6 +47,10 @@ def _side(title: str, row: dict) -> list[str]:
     out.append(
         f"- Policy gates: {'all pass' if not failed else 'FAIL ' + ', '.join(failed)}"
     )
+    lints = row.get("lints")
+    if lints is None:
+        lints = answer_lints(row, case)
+    out.append(f"- Lints (not gates): {'; '.join(lints) if lints else 'none'}")
     if row.get("web_sources"):
         out.append("- Web sources:")
         out += [f"  - <{u}>" for u in row["web_sources"]]
@@ -59,9 +63,9 @@ def _side(title: str, row: dict) -> list[str]:
 
 
 def _tag(row: dict) -> str:
-    return (
-        "pass" if all(v is True for v in row.get("policy", {}).values()) else "**fail**"
-    )
+    gates = all(v is True for v in row.get("policy", {}).values())
+    lints = len(row.get("lints") or [])
+    return ("pass" if gates else "**fail**") + (f" · {lints} lint" if lints else "")
 
 
 def build(offline: dict, online: dict, offline_path: Path, online_path: Path) -> str:
@@ -128,8 +132,8 @@ def build(offline: dict, online: dict, offline_path: Path, online_path: Path) ->
                 pages = ", ".join(map(str, c.get("source_pages", [])))
                 lines.append(f"- {c['claim']} (p. {pages})")
             lines.append("")
-        lines += _side("Offline (web off)", r)
-        lines += _side("Online (web on)", rows_on[cid])
+        lines += _side("Offline (web off)", r, lab)
+        lines += _side("Online (web on)", rows_on[cid], lab)
         lines += [
             REVIEW_BOXES,
             "",

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -112,6 +113,36 @@ def summarize(policy: list[dict]) -> dict:
         }
         for name in POLICY_NAMES
     }
+
+
+_INTERNAL_TERMS = re.compile(r"\b(sandbox|trace|local search|tools?)\b", re.IGNORECASE)
+_PAGE_AS_SECTION = re.compile(r"\bSection \d{3,}\b")
+_DISCLAIMER = re.compile(r"\bdoes not (?:cover|contain)\b", re.IGNORECASE)
+
+
+def answer_lints(row: dict, case: dict | None = None) -> list[str]:
+    """Answer-text findings for the reviewer; they never change ``passed``."""
+    case = case or {}
+    answer = row.get("answer") or ""
+    lints = [
+        f"internal term: {term}"
+        for term in sorted({m.lower() for m in _INTERNAL_TERMS.findall(answer)})
+    ]
+    lints += [f"page as section: {m}" for m in _PAGE_AS_SECTION.findall(answer)]
+    labelled = set(case.get("relevant_pages") or [])
+    retrieved = set(row.get("physical_pages") or [])
+    sufficient = (row.get("assessment") or {}).get("sufficient") is True
+    if _DISCLAIMER.search(answer) and (sufficient or labelled & retrieved):
+        lints.append("disclaimer although the book evidence covers the question")
+    if (
+        row.get("web_sources")
+        and case.get("web_expected") is False
+        and not re.search(r"\bweb\b", answer, re.IGNORECASE)
+    ):
+        lints.append("web sources fetched but not used in the answer")
+    if labelled - retrieved:
+        lints.append(f"labelled pages not retrieved: {sorted(labelled - retrieved)}")
+    return lints
 
 
 def sampling_record() -> dict:
@@ -249,6 +280,7 @@ async def _run_case(case, book, client, sandbox, counter, web) -> dict:
         row["stage_seconds"] = stage_times
         await asyncio.to_thread(client.unload_and_wait)
     row["policy"] = policy_checks(case, row, web=web)
+    row["lints"] = answer_lints(row, case)
     return row
 
 
@@ -367,6 +399,11 @@ def evaluate(
             "before": before.get("completion"),
         }
         report["policy_summary"] = summarize([r["policy"] for r in rows])
+        # Not a gate: lints are reviewer prompts and never change "passed".
+        report["lint_summary"] = {
+            "rows_with_lints": sum(1 for r in rows if r.get("lints")),
+            "rows": len(rows),
+        }
         report["status"] = "complete"
     except BaseException as exc:
         report.update(status="failed", error=f"{type(exc).__name__}: {exc}")
