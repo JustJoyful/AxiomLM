@@ -92,3 +92,32 @@ async def test_agent_final_prompts_use_neutral_wording_and_no_qa_trace():
     assert "If a rule appears only in an exercise, say so." in final
     assert "say the book describes related methods (by page)" in final
     assert len(agent.SOLVE_RULES) + len(agent.FINAL) <= 1000
+
+
+async def test_final_is_told_when_book_evidence_covers_the_question():
+    from src import agent
+    from tests.test_agent import (
+        Candidate,
+        Client,
+        Counter,
+        Sandbox,
+        collect,
+        qa_script,
+        search_with,
+    )
+
+    async def final_for(question, sufficient, page):
+        client = Client(qa_script(sufficient=sufficient))
+        await collect(
+            request=agent.AgentRequest("r", question, "sicp", "m"),
+            client=client,
+            sandbox=Sandbox(),
+            counter=Counter(),
+            search=search_with([Candidate("c", "text", page)], []),
+        )
+        return client.requests[-1]["messages"][-1]["content"]
+
+    # Covered by the requested page even though the model said insufficient.
+    assert agent.COVERED_NOTE in await final_for("Summarize page 1.", False, 1)
+    assert agent.COVERED_NOTE in await final_for("What is an interpreter?", True, 796)
+    assert agent.COVERED_NOTE not in await final_for("Latest Racket?", False, 300)

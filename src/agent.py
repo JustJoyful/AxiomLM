@@ -157,6 +157,9 @@ SOLVE_RULES = (
     "result was computed directly. If a rule appears only in an exercise, say so."
 )
 
+# The orchestrator's deterministic coverage verdict, so a small model does not
+# open with what the evidence lacks (run 06 cases 2, 3, 7).
+COVERED_NOTE = "The book evidence above addresses this question. "
 NO_RESULT_RULES = (
     "No computed result is available. Explain the method from the book evidence. "
     "Give a final value only if the evidence states it, and then say it comes from "
@@ -917,6 +920,8 @@ async def run_agent(
             )
         else:
             instructions = QA_RULES.format(web_note=web_note)
+            if coverage is not None:
+                instructions = COVERED_NOTE + instructions
         # Q&A gets no trace: it cost tokens and was echoed back as "the trace".
         computation_text = ""
         if computation is not None and computed_value(computation):
