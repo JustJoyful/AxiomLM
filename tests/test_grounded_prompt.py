@@ -48,3 +48,47 @@ async def test_agent_qa_rules_answer_directly_and_reach_the_final_prompt():
     # Measured with the configured model's chat counter: 133 tokens. A char bound
     # keeps later edits from silently eating the 4096-token final budget.
     assert len(agent.QA_RULES) <= 600
+
+
+async def test_agent_final_prompts_use_neutral_wording_and_no_qa_trace():
+    from src import agent
+    from tests.test_agent import (
+        Candidate,
+        Client,
+        Counter,
+        Sandbox,
+        collect,
+        qa_script,
+        search_with,
+        solve_script,
+    )
+
+    qa = Client(qa_script(sufficient=True))
+    await collect(
+        request=agent.AgentRequest("r", "What is an interpreter?", "sicp", "m"),
+        client=qa,
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "An interpreter", 796)], []),
+    )
+    final = qa.requests[-1]["messages"][-1]["content"]
+    assert "Trace" not in final and "local_search" not in final
+    assert "Do not mention tools, a sandbox, traces or internal steps." in final
+
+    solve = Client(solve_script())
+    await collect(
+        request=agent.AgentRequest(
+            "r", "What is the derivative of x^3 + 2x with respect to x?", "sicp", "m"
+        ),
+        client=solve,
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "deriv", 225)], []),
+    )
+    final = solve.requests[-1]["messages"][-1]["content"]
+    assert "sandbox computation" not in final
+    assert "A computation returned: 3*x**2 + 2." in final
+    assert "Computation output:\n3*x**2 + 2" in final
+    assert "If a rule appears only in an exercise, say so." in final
+    assert "say the book describes related methods (by page)" in final
+    assert len(agent.SOLVE_RULES) + len(agent.FINAL) <= 1000

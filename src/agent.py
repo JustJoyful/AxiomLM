@@ -130,10 +130,10 @@ CANDIDATE = (
     "Question: {question}\nComputation result: {result}"
 )
 FINAL = (
-    "Answer the question using only the evidence and trace below.\n"
-    "Question: {question}\n\nEvidence:\n{evidence}\n\nTrace:\n{trace}\n\n"
-    "{instructions} Keep the whole answer under 250 words so it fits the output "
-    "limit."
+    "Answer the question using only the evidence below.\n"
+    "Question: {question}\n\nEvidence:\n{evidence}\n\n{computation}"
+    "{instructions} Do not mention tools, a sandbox, traces or internal steps. "
+    "Keep the whole answer under 250 words so it fits the output limit."
 )
 QA_RULES = (
     "Answer directly from the book evidence, starting with the answer; do not open "
@@ -145,10 +145,13 @@ QA_RULES = (
     "book does not cover the question only if no passage addresses it{web_note}."
 )
 SOLVE_RULES = (
-    "The sandbox computation returned: {result}. Present that solution and its "
-    "steps. Verification status: {status} ({reason}). "
-    "Only call the answer verified if the status is 'verified'; otherwise say it "
-    "is unverified or disputed and why."
+    "A computation returned: {result}. Present that result and its steps. "
+    "Verification status: {status} ({reason}). Call the answer verified only if "
+    "the status is 'verified'; otherwise state the value plainly and say once that "
+    "it is unverified. Describe the method the computation used. Say the book's "
+    "method was used only if the evidence shows the book working this kind of "
+    "problem; otherwise say the book describes related methods (by page) but this "
+    "result was computed directly. If a rule appears only in an exercise, say so."
 )
 
 
@@ -812,14 +815,10 @@ async def run_agent(
             if solve
             else QA_RULES.format(web_note=web_note)
         )
-        trace_lines = [
-            f"{row['stage']}: {row.get('tool', 'model')} "
-            f"{row.get('status', row.get('done_reason', ''))}"
-            for row in run.trace
-            if "tool" in row or "model_request" in row
-        ]
-        if computation is not None:
-            trace_lines.append(f"computation result: {computation.data.get('result')}")
+        # Q&A gets no trace: it cost tokens and was echoed back as "the trace".
+        computation_text = ""
+        if computation is not None and computed_value(computation):
+            computation_text = f"Computation output:\n{computed_value(computation)}\n\n"
 
         def final_messages_for(sources):
             return [
@@ -834,7 +833,7 @@ async def run_agent(
                     "content": FINAL.format(
                         question=request.question,
                         evidence=evidence_text(sources),
-                        trace="\n".join(trace_lines),
+                        computation=computation_text,
                         instructions=instructions,
                     ),
                 },
