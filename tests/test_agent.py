@@ -61,14 +61,16 @@ class Client:
         reply = self.replies.pop(0)
         if callable(reply):
             reply = reply(messages)
+        reply = dict(reply)
+        done_reason = reply.pop("done_reason", "stop")
         message = {"role": "assistant", "content": "", "thinking": "", "tool_calls": []}
         message.update(reply)
         if on_chunk and message["content"]:
             on_chunk({"message": {"content": message["content"]}})
         return {
             "message": message,
-            "complete": True,
-            "done_reason": "stop",
+            "complete": done_reason == "stop",
+            "done_reason": done_reason,
             "prompt_eval_count": 10,
         }
 
@@ -623,6 +625,8 @@ async def test_compute_without_tool_call_retries_exactly_once():
     assert stages.count("compute_retry") == 1 and sandbox.executed
     assert last.data["verification"]["status"] == "verified"
     assert last.data["model_requests"] == 5
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 3*x**2 + 2." in final
 
 
 async def test_second_prose_compute_is_unverified_not_retried_again():
@@ -917,3 +921,114 @@ async def test_system_message_carries_the_injected_date():
         "Today's date is 2026-10-26." in r["messages"][0]["content"]
         for r in client.requests
     )
+
+
+SQRT = "Using Newton's method, what is the square root of 2 to six decimal places?"
+
+
+class FailsUntil(Sandbox):
+    """Fails the first ``failures`` executions with a traceback on stderr."""
+
+    def __init__(self, failures, value="1.414214"):
+        super().__init__(value=value)
+        self.failures = failures
+
+    async def execute(self, code):
+        self.executed.append(code)
+        if len(self.executed) <= self.failures:
+            return PythonResult("r", "error", stderr="TypeError: bad operand")
+        return PythonResult("r", "ok", value=self.value)
+
+
+def sqrt_script(*computes):
+    return [
+        {"content": '{"mode": "solve"}'},
+        {"content": '{"sufficient": true, "reason": "p.57", "check": null}'},
+        *computes,
+        {"content": "1.414214"},
+    ]
+
+
+async def test_length_stop_does_not_spend_the_repair_round():
+    sandbox = FailsUntil(1)
+    code = call("execute_python", code="result = sympy.N(sympy.sqrt(2), 7)")
+    client = Client(sqrt_script({"content": "", "done_reason": "length"}, code, code))
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=sandbox,
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    stages = [r["stage"] for r in last.data["trace"] if "model_request" in r]
+    assert stages == [
+        "classify",
+        "local_assessment",
+        "compute",
+        "compute_retry",
+        "compute_repair",
+        "final",
+    ]
+    assert len(sandbox.executed) == 2
+    failed = [r for r in last.data["trace"] if r.get("status") == "error"]
+    assert failed[0]["error"] == "TypeError: bad operand"
+    assert failed[0]["code"] == "result = sympy.N(sympy.sqrt(2), 7)"
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 1.414214." in final
+
+
+async def test_no_computed_value_never_invites_an_estimate():
+    code = call("execute_python", code="result = broken()")
+    client = Client(sqrt_script(code, code))
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=FailsUntil(2),
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "No computed result is available." in final and "Do not estimate" in final
+    assert "no result" not in final and "Computation output" not in final
+    # An ordinary failed repair is still one round, never a second.
+    assert last.data["model_requests"] == 5
+
+
+@pytest.mark.parametrize(
+    ("question", "value", "shown"),
+    [
+        (SQRT, "1.414213562373095", "1.414214 (rounded from 1.414213562373095)"),
+        (
+            "Give sqrt(3) to 3 decimal places.",
+            "1.7320508",
+            "1.732 (rounded from 1.7320508)",
+        ),
+        (SQRT, "1.414214", "1.414214"),
+        (SQRT, "3*x**2 + 2", "3*x**2 + 2"),
+        ("What is sqrt(2)?", "1.414213562373095", "1.414213562373095"),
+        (SQRT, "1.41421", "1.41421 (only 5 decimal places were computed)"),
+        (
+            SQRT,
+            "Square root of 2: 1.414213562373095\nTo six decimal places: 1.41421",
+            "1.414214 (rounded from 1.414213562373095)",
+        ),
+    ],
+)
+def test_requested_decimal_places_are_rounded_by_the_host(question, value, shown):
+    from src.agent import rounded_for
+
+    assert rounded_for(question, value) == shown
+
+
+async def test_final_gets_the_rounded_value_and_its_source():
+    code = call("execute_python", code="result = sympy.N(sympy.sqrt(2), 15)")
+    client = Client(sqrt_script(code))
+    await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=Sandbox(value="1.41421356237310"),
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 1.414214 (rounded from 1.41421356237310)." in final

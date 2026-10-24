@@ -109,9 +109,12 @@ ASSESS = (
     "Question: {question}\n\nEvidence:\n{evidence}"
 )
 COMPUTE = (
-    "Solve the question by calling execute_python once with SymPy code (sympy is "
-    "already imported; define symbols yourself; assign the final answer to "
-    "`result`). Follow the book's method when the evidence shows one.\n"
+    "Solve the question by calling execute_python once with short SymPy code "
+    "(sympy is already imported; define symbols yourself; assign the final answer "
+    "to `result`). Follow the book's method when the evidence shows one. For a "
+    "numeric answer assign the unrounded number, e.g. "
+    "result = sympy.N(sympy.sqrt(2), 15); never round in code, and iterate to a "
+    "tolerance of 1e-12 or tighter.\n"
     "Question: {question}\n\nBook evidence:\n{evidence}"
 )
 COMPUTE_RETRY = (
@@ -153,6 +156,52 @@ SOLVE_RULES = (
     "problem; otherwise say the book describes related methods (by page) but this "
     "result was computed directly. If a rule appears only in an exercise, say so."
 )
+
+NO_RESULT_RULES = (
+    "No computed result is available. Explain the method from the book evidence. "
+    "Give a final value only if the evidence states it, and then say it comes from "
+    "the book; otherwise say the value could not be computed. Do not estimate one."
+)
+
+_NUMBER_WORDS = [
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+]
+_DECIMALS = re.compile(
+    r"\b(\d+|" + "|".join(_NUMBER_WORDS) + r")\s+decimal\s+places?\b", re.IGNORECASE
+)
+
+
+def rounded_for(question: str, value: str | None) -> str | None:
+    """The computed value as shown, rounded to the decimal places asked for.
+
+    Rounding is deterministic host work; the model misrounded long values.
+    """
+    match = _DECIMALS.search(question)
+    if not match or value is None:
+        return value
+    word = match.group(1).lower()
+    places = int(word) if word.isdigit() else _NUMBER_WORDS.index(word) + 1
+    # Printed output may hold several numbers; the most precise one is the source.
+    numbers = re.findall(r"-?\d+\.\d+", value)
+    if not numbers:
+        return value
+    source = max(numbers, key=lambda n: len(n.partition(".")[2]))
+    number = float(source)
+    digits = len(source.partition(".")[2])
+    if digits < places:
+        # Padding would claim precision the computation never had.
+        return f"{source} (only {digits} decimal places were computed)"
+    shown = f"{number:.{places}f}"
+    return shown if shown == value.strip() else f"{shown} (rounded from {source})"
 
 
 _BOOK_REFERENCE = re.compile(
@@ -479,9 +528,19 @@ class _Run:
             self.remaining(),
         )
         self.sources.extend(s for s in result.sources if s not in self.sources)
-        self.trace.append(
-            {"stage": stage, "tool": name, "status": result.status, "call_id": call_id}
-        )
+        row = {
+            "stage": stage,
+            "tool": name,
+            "status": result.status,
+            "call_id": call_id,
+        }
+        # The final prompt never sees the trace; these make failures debuggable.
+        if name == "execute_python" and isinstance(arguments, dict):
+            row["code"] = str(arguments.get("code", ""))[:600]
+        if result.status != "ok":
+            error = result.data.get("error") or result.data.get("stderr") or ""
+            row["error"] = str(error)[-300:]
+        self.trace.append(row)
         return result
 
 
@@ -571,6 +630,7 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
                 {"role": "tool", "content": tool_message(computation)},
                 {"role": "user", "content": COMPUTE_REPAIR},
             ]
+        ran_out = turn.get("done_reason") == "length" and computation is None
         turn = await run.chat(
             "compute_retry",
             messages,
@@ -579,6 +639,30 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
             reserve=config.AGENT_FINAL_OUTPUT_TOKENS,
         )
         computation = await run_calls(turn) or computation
+        # A length stop is a spent budget, not the model's answer, so code that
+        # then fails still gets its one repair, if the request cap leaves room
+        # for it, a possible candidate turn and the final answer.
+        check = question_check(request.question) or assessment.verification_check
+        if (
+            ran_out
+            and computation is not None
+            and computation.status != "ok"
+            and run.model_requests + (3 if check else 2)
+            <= config.AGENT_MAX_MODEL_REQUESTS
+        ):
+            messages += [
+                turn["message"],
+                {"role": "tool", "content": tool_message(computation)},
+                {"role": "user", "content": COMPUTE_REPAIR},
+            ]
+            turn = await run.chat(
+                "compute_repair",
+                messages,
+                tools=definitions(["execute_python"]),
+                think=True,
+                reserve=config.AGENT_FINAL_OUTPUT_TOKENS,
+            )
+            computation = await run_calls(turn) or computation
     if computation is None:
         computation = ToolResult(
             "none",
@@ -806,15 +890,16 @@ async def run_agent(
             web_note = "; web access is off, so no web evidence was used"
 
         yield step("final")
-        instructions = (
-            SOLVE_RULES.format(
-                result=computed_value(computation) or "no result",
+        if solve and not computed_value(computation):
+            instructions = NO_RESULT_RULES
+        elif solve:
+            instructions = SOLVE_RULES.format(
+                result=rounded_for(request.question, computed_value(computation)),
                 status=check_result.status,
                 reason=check_result.reason,
             )
-            if solve
-            else QA_RULES.format(web_note=web_note)
-        )
+        else:
+            instructions = QA_RULES.format(web_note=web_note)
         # Q&A gets no trace: it cost tokens and was echoed back as "the trace".
         computation_text = ""
         if computation is not None and computed_value(computation):
