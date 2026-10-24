@@ -859,7 +859,9 @@ async def test_question_about_the_book_with_passages_skips_the_web():
 
 async def test_web_query_is_the_rewritten_followup_not_the_raw_question():
     web = Web()
-    query = "What are other examples of an interpreter in SICP?"
+    # A rewrite naming the book ("... in SICP?") is book-scoped and skips the web
+    # (see test_followup_control_prompts_see_the_resolved_question).
+    query = "What are other examples of an interpreter?"
     await collect(
         request=AgentRequest(
             "r",
@@ -875,7 +877,7 @@ async def test_web_query_is_the_rewritten_followup_not_the_raw_question():
         search=search_with([Candidate("c", "unrelated", 630)], []),
         web=web,
     )
-    assert web.calls[0] == ("search", query)
+    assert web.calls[0] == ("search", query + " sicp")
 
 
 async def test_off_book_question_still_searches_the_web_with_no_book_name():
@@ -1032,3 +1034,42 @@ async def test_final_gets_the_rounded_value_and_its_source():
     )
     final = client.requests[-1]["messages"][-1]["content"]
     assert "A computation returned: 1.414214 (rounded from 1.41421356237310)." in final
+
+
+async def test_followup_control_prompts_see_the_resolved_question():
+    web = Web()
+    resolved = "What is another example of an interpreter in SICP?"
+    client = Client(qa_script())
+    await collect(
+        request=AgentRequest(
+            "r",
+            "Give another example of that.",
+            "sicp",
+            "m",
+            web_enabled=True,
+            retrieval_query=resolved,
+        ),
+        client=client,
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "486", 35)], []),
+        web=web,
+    )
+    route, assess, final = (r["messages"][-1]["content"] for r in client.requests)
+    assert resolved in route and resolved in assess
+    assert "Give another example of that. (meaning: " + resolved + ")" in final
+    # The resolved question names the book, so the web is not consulted.
+    assert web.calls == []
+
+
+def test_overview_retrieval_string_is_not_a_resolved_question():
+    from src.agent import resolved_question
+
+    request = AgentRequest(
+        "r",
+        "What is this book about?",
+        "sicp",
+        "m",
+        retrieval_query=config.BOOK_OVERVIEW_RETRIEVAL_QUERY,
+    )
+    assert resolved_question(request) == "What is this book about?"

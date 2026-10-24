@@ -210,9 +210,23 @@ _BOOK_REFERENCE = re.compile(
 )
 
 
-def refers_to_book(text: str) -> bool:
+def refers_to_book(text: str | None, book_stem: str = "") -> bool:
     """A deterministic sign that a question is about the book itself."""
-    return bool(text and (_BOOK_REFERENCE.search(text) or extract_page_intent(text)))
+    if not text:
+        return False
+    named = book_stem and re.search(rf"\b{re.escape(book_stem)}\b", text, re.IGNORECASE)
+    return bool(named or _BOOK_REFERENCE.search(text) or extract_page_intent(text))
+
+
+def resolved_question(request: AgentRequest) -> str:
+    """The standalone form of a follow-up when the rewrite produced one.
+
+    Retrieval-only strings (the whole-book overview query) are not questions.
+    """
+    query = (request.retrieval_query or "").strip()
+    if query.endswith("?") and query != request.question:
+        return query
+    return request.question
 
 
 def local_coverage(
@@ -229,7 +243,8 @@ def local_coverage(
     if pages and any(set(s.physical_pages) & set(pages) for s in book):
         return "requested pages retrieved"
     if book and any(
-        refers_to_book(text) for text in (request.question, request.retrieval_query)
+        refers_to_book(text, request.book_stem)
+        for text in (request.question, request.retrieval_query)
     ):
         return "question is about the book"
     return "assessed sufficient" if sufficient else None
@@ -590,7 +605,8 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
         {
             "role": "user",
             "content": COMPUTE.format(
-                question=request.question, evidence=evidence_text(run.sources)
+                question=resolved_question(request),
+                evidence=evidence_text(run.sources),
             ),
         },
     ]
@@ -779,7 +795,7 @@ async def run_agent(
                 run.system(),
                 {
                     "role": "user",
-                    "content": CLASSIFY.format(question=request.question),
+                    "content": CLASSIFY.format(question=resolved_question(request)),
                 },
             ],
             reserve=config.AGENT_ROUTER_OUTPUT_TOKENS,
@@ -827,7 +843,8 @@ async def run_agent(
                 {
                     "role": "user",
                     "content": ASSESS.format(
-                        question=request.question, evidence=evidence_text(run.sources)
+                        question=resolved_question(request),
+                        evidence=evidence_text(run.sources),
                     ),
                 },
             ],
@@ -905,6 +922,10 @@ async def run_agent(
         if computation is not None and computed_value(computation):
             computation_text = f"Computation output:\n{computed_value(computation)}\n\n"
 
+        asked = request.question
+        if resolved_question(request) != asked:
+            asked = f"{asked} (meaning: {resolved_question(request)})"
+
         def final_messages_for(sources):
             return [
                 run.system(),
@@ -916,7 +937,7 @@ async def run_agent(
                 {
                     "role": "user",
                     "content": FINAL.format(
-                        question=request.question,
+                        question=asked,
                         evidence=evidence_text(sources),
                         computation=computation_text,
                         instructions=instructions,

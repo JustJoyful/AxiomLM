@@ -116,3 +116,35 @@ async def test_book_overview_query_is_traced_without_retrieved_evidence():
     assert result.original_question == "What this book about brocacho"
     assert result.applied
     assert "preface" in result.retrieval_query and "purpose" in result.retrieval_query
+
+
+async def test_interpreter_followup_is_rewritten_to_name_its_subject():
+    calls = []
+    standalone = "What is another example of an interpreter in SICP?"
+
+    class Client:
+        async def agenerate(self, prompt, **kwargs):
+            calls.append(prompt)
+            return {"response": standalone, "done": True, "done_reason": "stop"}
+
+        def unload_and_wait(self):
+            pass
+
+    exchanges = [
+        rewrite.ConversationExchange(
+            "What is an interpreter?",
+            "An interpreter executes source programs by analyzing them and calling "
+            "primitive procedures.",
+            "sicp",
+        )
+    ]
+    result = await rewrite.rewrite_followup(
+        "Give another example of that.", exchanges, "sicp", model="m", client=Client()
+    )
+    assert result.applied and result.fallback_reason is None
+    assert result.retrieval_query == standalone
+    assert "What is an interpreter?" in calls[0]
+    assert "calling primitive procedures" in calls[0]
+    # Measured at temperature 0: an added "name the subject" instruction made the
+    # model emit an imperative without "?", which is rejected; the prompt as is
+    # already names the interpreter.
