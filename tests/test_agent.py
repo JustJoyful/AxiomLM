@@ -1146,3 +1146,19 @@ def test_fallback_code_only_for_recognised_forms():
         "result = sympy.N(sympy.sqrt(sympy.Rational('2.25')), 15)"
     )
     assert fallback_code("Differentiate x^2") is None
+
+
+async def test_rounded_value_replaces_raw_output_that_misrounds():
+    code = call("execute_python", code="print(...)")
+    client = Client(sqrt_script(code))
+    raw = "Square root of 2: 1.414213562373095\nTo six decimal places: 1.41421"
+    await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=Sandbox(value=raw),
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "Computation output:\n1.414214 (rounded from 1.414213562373095)" in final
+    assert "To six decimal places: 1.41421" not in final

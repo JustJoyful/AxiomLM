@@ -999,7 +999,11 @@ async def run_agent(
         # Q&A gets no trace: it cost tokens and was echoed back as "the trace".
         computation_text = ""
         if computation is not None and computed_value(computation):
-            computation_text = f"Computation output:\n{computed_value(computation)}\n\n"
+            # When the host rounded, the raw output (which may hold the model's own
+            # misrounded line) is not shown beside it.
+            value = computed_value(computation)
+            shown = rounded_for(request.question, value)
+            computation_text = f"Computation output:\n{shown}\n\n"
 
         asked = request.question
         if resolved_question(request) != asked:
