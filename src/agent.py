@@ -125,6 +125,11 @@ COMPUTE_REPAIR = (
     "The code above failed. Fix it and call execute_python once more; assign the "
     "answer to `result`."
 )
+COMPUTE_PRECISION = (
+    "That result has only {0} decimal places; the question asks for {1}. Call "
+    "execute_python once more without rounding, iterating to a tolerance of 1e-12, "
+    "and assign the unrounded number to `result`."
+)
 CANDIDATE = (
     "From the computation below, reply with JSON only: "
     '{{"candidate": "<one value>"}}. The value is a number or a SymPy expression in '
@@ -183,27 +188,42 @@ _DECIMALS = re.compile(
 )
 
 
+def requested_places(question: str) -> int | None:
+    match = _DECIMALS.search(question)
+    if not match:
+        return None
+    word = match.group(1).lower()
+    return int(word) if word.isdigit() else _NUMBER_WORDS.index(word) + 1
+
+
+def most_precise(value: str | None) -> str | None:
+    """Printed output may hold several numbers; the most precise one is the source."""
+    numbers = re.findall(r"-?\d+\.\d+", value or "")
+    return max(numbers, key=lambda n: len(n.partition(".")[2])) if numbers else None
+
+
+def precision_shortfall(question: str, value: str | None) -> tuple[int, int] | None:
+    """(digits computed, places asked) when a number has fewer decimals than asked."""
+    places, source = requested_places(question), most_precise(value)
+    if places is None or source is None:
+        return None
+    digits = len(source.partition(".")[2])
+    return (digits, places) if digits < places else None
+
+
 def rounded_for(question: str, value: str | None) -> str | None:
     """The computed value as shown, rounded to the decimal places asked for.
 
     Rounding is deterministic host work; the model misrounded long values.
     """
-    match = _DECIMALS.search(question)
-    if not match or value is None:
+    places, source = requested_places(question), most_precise(value)
+    if places is None or source is None:
         return value
-    word = match.group(1).lower()
-    places = int(word) if word.isdigit() else _NUMBER_WORDS.index(word) + 1
-    # Printed output may hold several numbers; the most precise one is the source.
-    numbers = re.findall(r"-?\d+\.\d+", value)
-    if not numbers:
-        return value
-    source = max(numbers, key=lambda n: len(n.partition(".")[2]))
-    number = float(source)
-    digits = len(source.partition(".")[2])
-    if digits < places:
+    short = precision_shortfall(question, value)
+    if short:
         # Padding would claim precision the computation never had.
-        return f"{source} (only {digits} decimal places were computed)"
-    shown = f"{number:.{places}f}"
+        return f"{source} (only {short[0]} decimal places were computed)"
+    shown = f"{float(source):.{places}f}"
     return shown if shown == value.strip() else f"{shown} (rounded from {source})"
 
 
@@ -682,6 +702,33 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
                 reserve=config.AGENT_FINAL_OUTPUT_TOKENS,
             )
             computation = await run_calls(turn) or computation
+    # Fewer decimals than asked (the book's 1e-5 tolerance, or rounding in code)
+    # is a fixable failure: one recompute, if the cap leaves room, kept only if
+    # it fixes the shortfall.
+    short = precision_shortfall(request.question, computed_value(computation))
+    check = question_check(request.question) or assessment.verification_check
+    if short and run.model_requests + (3 if check else 2) <= (
+        config.AGENT_MAX_MODEL_REQUESTS
+    ):
+        messages += [
+            turn["message"],
+            {"role": "tool", "content": tool_message(computation)},
+            {"role": "user", "content": COMPUTE_PRECISION.format(*short)},
+        ]
+        turn = await run.chat(
+            "compute_precision",
+            messages,
+            tools=definitions(["execute_python"]),
+            think=True,
+            reserve=config.AGENT_FINAL_OUTPUT_TOKENS,
+        )
+        better = await run_calls(turn)
+        if (
+            better is not None
+            and computed_value(better)
+            and not precision_shortfall(request.question, computed_value(better))
+        ):
+            computation = better
     if computation is None:
         computation = ToolResult(
             "none",

@@ -1073,3 +1073,43 @@ def test_overview_retrieval_string_is_not_a_resolved_question():
         retrieval_query=config.BOOK_OVERVIEW_RETRIEVAL_QUERY,
     )
     assert resolved_question(request) == "What is this book about?"
+
+
+async def test_too_few_decimals_get_one_precision_recompute():
+    class Precise(Sandbox):
+        async def execute(self, code):
+            self.executed.append(code)
+            value = "1.41421" if len(self.executed) == 1 else "1.414213562373095"
+            return PythonResult("r", "ok", value=value)
+
+    code = call("execute_python", code="result = newton(2)")
+    client = Client(sqrt_script(code, code))
+    sandbox = Precise()
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=sandbox,
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    stages = [r["stage"] for r in last.data["trace"] if "model_request" in r]
+    assert stages.count("compute_precision") == 1 and len(sandbox.executed) == 2
+    assert "only 5 decimal places; the question asks for 6" in (
+        client.requests[3]["messages"][-1]["content"]
+    )
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 1.414214 (rounded from 1.414213562373095)." in final
+
+
+async def test_precision_recompute_that_does_not_help_keeps_the_first_value():
+    code = call("execute_python", code="result = newton(2)")
+    client = Client(sqrt_script(code, code))
+    await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=Sandbox(value="1.41421"),
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "1.41421 (only 5 decimal places were computed)" in final
