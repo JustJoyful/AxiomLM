@@ -169,6 +169,110 @@ class OllamaClient:
                         raise RuntimeError(str(data["error"]))
                     yield data
 
+    async def astream_chat(
+        self,
+        messages: list[JsonObject],
+        *,
+        model: str,
+        tools: list[JsonObject] | None,
+        think: bool,
+        num_predict: int,
+        timeout: float,
+    ) -> AsyncIterator[JsonObject]:
+        """Stream native chat chunks under one total deadline, silent gaps included."""
+        payload: JsonObject = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "think": think,
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+            "options": {**self._options(), "num_predict": num_predict},
+        }
+        if tools:
+            payload["tools"] = tools
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        def remaining() -> float:
+            left = deadline - loop.time()
+            if left <= 0:
+                raise TimeoutError("Ollama chat exceeded its total deadline")
+            return left
+
+        async with (
+            httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout),
+                transport=self._async_transport,
+                trust_env=False,
+            ) as client,
+            client.stream(
+                "POST", f"{self.base_url}/api/chat", json=payload
+            ) as response,
+        ):
+            response.raise_for_status()
+            lines = response.aiter_lines()
+            while True:
+                try:
+                    line = await asyncio.wait_for(anext(lines), remaining())
+                except StopAsyncIteration:
+                    return
+                if not line:
+                    continue
+                data = json.loads(line)
+                if not isinstance(data, dict):
+                    raise ValueError("Invalid Ollama chat chunk")  # noqa: TRY004
+                if data.get("error"):
+                    raise RuntimeError(str(data["error"]))
+                yield data
+
+    async def achat(
+        self,
+        messages: list[JsonObject],
+        *,
+        model: str,
+        tools: list[JsonObject] | None,
+        think: bool,
+        num_predict: int,
+        timeout: float,
+        on_chunk: Callable[[JsonObject], None] | None = None,
+    ) -> JsonObject:
+        """Aggregate one streamed turn; raw thinking/tool_calls are kept for replay."""
+        content, thinking, calls, final = [], [], [], None
+        async for chunk in self.astream_chat(
+            messages,
+            model=model,
+            tools=tools,
+            think=think,
+            num_predict=num_predict,
+            timeout=timeout,
+        ):
+            message = chunk.get("message") or {}
+            content.append(message.get("content") or "")
+            thinking.append(message.get("thinking") or "")
+            calls.extend(message.get("tool_calls") or [])
+            if on_chunk is not None:
+                on_chunk(chunk)
+            if chunk.get("done"):
+                final = chunk
+        if final is None:
+            raise ValueError("Ollama chat stream ended without a final chunk")
+        return {
+            "message": {
+                "role": "assistant",
+                "content": "".join(content),
+                "thinking": "".join(thinking),
+                "tool_calls": calls,
+            },
+            "done_reason": final.get("done_reason"),
+            # A length stop is never a complete answer or a complete tool call.
+            "complete": final.get("done_reason") == "stop",
+            "prompt_eval_count": final.get("prompt_eval_count"),
+            "prompt_eval_cached_count": final.get("prompt_eval_cached_count"),
+            "eval_count": final.get("eval_count"),
+            "total_duration": final.get("total_duration"),
+            "load_duration": final.get("load_duration"),
+        }
+
     def chat(
         self,
         messages: list[JsonObject],

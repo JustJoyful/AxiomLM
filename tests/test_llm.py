@@ -192,3 +192,121 @@ async def test_async_completion_rejects_error_or_incomplete_json(body):
         await client.agenerate(
             "q", model="local", think=False, num_predict=96, timeout=15
         )
+
+
+def _chat_stream(chunks):
+    import json
+
+    body = "".join(json.dumps(c) + "\n" for c in chunks).encode()
+    return httpx.Response(200, content=body)
+
+
+async def test_native_chat_keeps_budget_tools_and_raw_turn_fields():
+    import json
+
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return _chat_stream(
+            [
+                {"message": {"thinking": "plan ", "content": ""}, "done": False},
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {"function": {"name": "f", "arguments": {"q": "x"}}}
+                        ],
+                    },
+                    "done": False,
+                },
+                {
+                    "message": {"content": "ok"},
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 10,
+                    "eval_count": 3,
+                },
+            ]
+        )
+
+    client = OllamaClient(async_transport=httpx.MockTransport(handler))
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
+    turn = await client.achat(
+        [{"role": "user", "content": "q"}],
+        model=config.OLLAMA_MODEL,
+        tools=tools,
+        think=True,
+        num_predict=768,
+        timeout=120.0,
+    )
+    assert seen["keep_alive"] == 0 and seen["stream"] is True
+    assert seen["options"]["num_predict"] == 768 and seen["think"] is True
+    assert seen["tools"] == tools
+    assert turn["message"]["thinking"] == "plan "
+    assert turn["message"]["tool_calls"][0]["function"]["name"] == "f"
+    assert turn["complete"] and turn["prompt_eval_count"] == 10
+
+
+async def test_length_limited_chat_is_not_complete():
+    def handler(request):
+        return _chat_stream(
+            [{"message": {"content": "partial"}, "done": True, "done_reason": "length"}]
+        )
+
+    client = OllamaClient(async_transport=httpx.MockTransport(handler))
+    turn = await client.achat(
+        [{"role": "user", "content": "q"}],
+        model=config.OLLAMA_MODEL,
+        tools=None,
+        think=False,
+        num_predict=8,
+        timeout=5.0,
+    )
+    assert turn["complete"] is False and turn["done_reason"] == "length"
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [{"error": "model failed"}],
+        [{"message": {"content": "no final"}, "done": False}],
+    ],
+)
+async def test_chat_errors_and_missing_final_chunk_fail(chunks):
+    client = OllamaClient(
+        async_transport=httpx.MockTransport(lambda request: _chat_stream(chunks))
+    )
+    with pytest.raises((RuntimeError, ValueError)):
+        await client.achat(
+            [{"role": "user", "content": "q"}],
+            model=config.OLLAMA_MODEL,
+            tools=None,
+            think=False,
+            num_predict=8,
+            timeout=5.0,
+        )
+
+
+async def test_chat_total_deadline_covers_silent_streams():
+    import asyncio
+
+    class Silent(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await asyncio.sleep(10)
+            yield b""
+
+    client = OllamaClient(
+        async_transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, stream=Silent())
+        )
+    )
+    with pytest.raises(TimeoutError):
+        await client.achat(
+            [{"role": "user", "content": "q"}],
+            model=config.OLLAMA_MODEL,
+            tools=None,
+            think=False,
+            num_predict=8,
+            timeout=0.05,
+        )
