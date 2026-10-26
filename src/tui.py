@@ -18,7 +18,7 @@ from threading import Lock, Thread
 from typing import ClassVar
 from uuid import uuid4
 
-from httpx import Client, ConnectError, HTTPStatusError, ReadTimeout
+from httpx import Client, ConnectError, HTTPError, HTTPStatusError, ReadTimeout
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -152,6 +152,7 @@ class AxiomLMApp(App):
         Binding("tab", "complete_prompt", show=False, priority=True),
         Binding("escape", "escape", show=False, priority=True),
         Binding("ctrl+c", "interrupt", show=False, priority=True),
+        Binding("ctrl+shift+c,super+c", "copy_selection", show=False, priority=True),
         Binding("ctrl+l", "clear_chat", show=False, priority=True),
         Binding("pageup", "page_up", show=False, priority=True),
         Binding("pagedown", "page_down", show=False, priority=True),
@@ -196,6 +197,10 @@ class AxiomLMApp(App):
         self._ingest_view = None
         self._ingest_path = ""
         self.queued_query = None
+        self.web_enabled = config.WEB_ENABLED_DEFAULT
+        self._agent_routing = config.AGENT_ROUTING_ENABLED
+        self._request_web = {}
+        self._sandbox = None
         self.turns = []
         self.notices = []
         self._home_visible = True
@@ -593,7 +598,19 @@ class AxiomLMApp(App):
         else:
             self.query_one(QueryComposer).clear()
 
+    async def action_copy_selection(self):
+        selected = self.screen.get_selected_text()
+        if not selected and isinstance(self.focused, QueryComposer):
+            selected = self.focused.selected_text
+        if selected:
+            await self._copy(selected)
+            self._last_interrupt = 0.0
+            return True
+        return False
+
     async def action_interrupt(self):
+        if await self.action_copy_selection():
+            return
         if self.overlay or self._busy():
             await self.action_escape()
         elif time.monotonic() - self._last_interrupt <= config.UI_QUIT_CONFIRM_SECONDS:
@@ -892,6 +909,7 @@ class AxiomLMApp(App):
             self.top_k_results,
             self.distance_threshold,
         )
+        self._request_web[request_id] = self.web_enabled
         completed_history = self._conversation[-4:]
         self._request_exchanges[request_id] = tuple(
             ConversationExchange(question["content"], answer["content"], book)
@@ -967,71 +985,125 @@ class AxiomLMApp(App):
                 record.steps.append(
                     f"↳ rewrite {'applied' if rewritten.applied else 'fallback'} · {time.monotonic()-rewrite_started:.1f}s · {rewritten.fallback_reason or rewritten.retrieval_query}"
                 )
-            record.phase = "RETRIEVING"
-            retrieval = asyncio.create_task(
-                asyncio.to_thread(
-                    self._prepare_query,
+            counter = await self._agent_counter(model, record)
+            if counter is not None:
+                updater = view.answer.get_stream(view.answer)
+                self._answer_streams[request_id] = (updater, pending)
+                record.phase = "RETRIEVING"
+                response = self._agent_events(
+                    request_id,
                     query,
-                    history,
                     book,
+                    model,
+                    rewritten,
                     k,
                     distance,
-                    rewritten.retrieval_query,
-                    model,
+                    counter,
+                    client,
                 )
-            )
-            prompt, metadata, pages, _ids = await asyncio.shield(retrieval)
-            if self._is_query_cancelled(request_id):
-                raise asyncio.CancelledError
-            self._last_retrieved_pages = pages
-            self._set_turn_evidence(request_id, "", book, metadata)
-            if any(meta.get("page_filter_fallback") == "True" for meta in metadata):
-                record.steps.append(
-                    "↳ no chunks found for requested pages · used semantic fallback"
-                )
-            for meta in metadata:
-                record.steps.append(
-                    f"↳ {meta.get('index_mode', 'dense')} · {meta.get('chunk_id', '?')} · dense {meta.get('dense_rank', '—')} / BM25 {meta.get('bm25_rank', '—')} · pages {meta.get('physical_pages', '[]')}"
-                )
-            record.steps.append(
-                f"↳ search_local_index ✓ {len(metadata)} chunks · {time.monotonic()-started:.1f}s"
-            )
-            view.step_line.update(record.steps[-1] + "\n↳ thinking …")
-            record.phase = "THINKING"
-            updater = view.answer.get_stream(view.answer)
-
-            self._answer_streams[request_id] = (updater, pending)
-            response = client.astream_generate(prompt, model=model, think=False)
-            try:
-                async for data in response:
-                    if (
-                        self._active_query_request_id != request_id
-                        or self._is_query_cancelled(request_id)
-                    ):
-                        raise asyncio.CancelledError
-                    token = data.get("response", "")
-                    if token:
-                        pending.append(buffer.feed(token))
-                        record.raw_answer = buffer.raw
-                        record.copy_text = buffer.visible
-                        record.copy_is_sanitized = record.copy_text != record.raw_answer
-                        if record.phase != "STREAMING":
-                            record.steps.append(
-                                f"↳ thinking ✓ {time.monotonic()-started:.1f}s"
+                outcome = None
+                try:
+                    async for event in response:
+                        if (
+                            self._active_query_request_id != request_id
+                            or self._is_query_cancelled(request_id)
+                        ):
+                            raise asyncio.CancelledError
+                        outcome = (
+                            self._apply_agent_event(
+                                request_id,
+                                event,
+                                record,
+                                view,
+                                buffer,
+                                pending,
+                                book,
+                                started,
                             )
-                            view.step_line.update("\n".join(record.steps))
-                        record.phase = "STREAMING"
-                        self._status = "▌ writing"
-                    await asyncio.sleep(0)
-                    if data.get("done"):
-                        saw_done = True
-                        break
-            finally:
-                await response.aclose()
-                self._transport_closed[request_id].set()
-            if not saw_done:
-                raise RuntimeError("Ollama stream ended before completion")
-            terminal_phase = "DONE"
+                            or outcome
+                        )
+                        await asyncio.sleep(0)
+                finally:
+                    await response.aclose()
+                    self._transport_closed[request_id].set()
+                if outcome is None:
+                    raise RuntimeError("agent ended without a result")
+                if outcome != "DONE":
+                    failure = outcome
+                else:
+                    terminal_phase = "DONE"
+            else:
+                record.phase = "RETRIEVING"
+                retrieval = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._prepare_query,
+                        query,
+                        history,
+                        book,
+                        k,
+                        distance,
+                        rewritten.retrieval_query,
+                        model,
+                    )
+                )
+                prompt, metadata, pages, _ids = await asyncio.shield(retrieval)
+                if metadata:
+                    record.retrieval_query = metadata[0].get(
+                        "retrieval_query", rewritten.retrieval_query
+                    )
+                if self._is_query_cancelled(request_id):
+                    raise asyncio.CancelledError
+                self._last_retrieved_pages = pages
+                self._set_turn_evidence(request_id, "", book, metadata)
+                if any(meta.get("page_filter_fallback") == "True" for meta in metadata):
+                    record.steps.append(
+                        "↳ no chunks found for requested pages · used semantic fallback"
+                    )
+                for meta in metadata:
+                    record.steps.append(
+                        f"↳ {meta.get('index_mode', 'dense')} · {meta.get('chunk_id', '?')} · dense {meta.get('dense_rank', '—')} / BM25 {meta.get('bm25_rank', '—')} · pages {meta.get('physical_pages', '[]')}"
+                    )
+                record.steps.append(
+                    f"↳ search_local_index ✓ {len(metadata)} chunks · {time.monotonic()-started:.1f}s"
+                )
+                view.step_line.update(record.steps[-1] + "\n↳ thinking …")
+                record.phase = "THINKING"
+                updater = view.answer.get_stream(view.answer)
+
+                self._answer_streams[request_id] = (updater, pending)
+                response = client.astream_generate(prompt, model=model, think=False)
+                try:
+                    async for data in response:
+                        if (
+                            self._active_query_request_id != request_id
+                            or self._is_query_cancelled(request_id)
+                        ):
+                            raise asyncio.CancelledError
+                        token = data.get("response", "")
+                        if token:
+                            pending.append(buffer.feed(token))
+                            record.raw_answer = buffer.raw
+                            record.copy_text = buffer.visible
+                            record.copy_is_sanitized = (
+                                record.copy_text != record.raw_answer
+                            )
+                            if record.phase != "STREAMING":
+                                record.steps.append(
+                                    f"↳ thinking ✓ {time.monotonic()-started:.1f}s"
+                                )
+                                view.step_line.update("\n".join(record.steps))
+                            record.phase = "STREAMING"
+                            self._status = "▌ writing"
+                        await asyncio.sleep(0)
+                        if data.get("done"):
+                            saw_done = True
+                            break
+                finally:
+                    await response.aclose()
+                    self._transport_closed[request_id].set()
+                if not saw_done:
+                    raise RuntimeError("Ollama stream ended before completion")
+                terminal_phase = "DONE"
         except asyncio.CancelledError:
             terminal_phase = "CANCELLED"
             self._cancelled_query_ids.add(request_id)
@@ -1102,6 +1174,7 @@ class AxiomLMApp(App):
             self._request_books.pop(request_id, None)
             self._request_context.pop(request_id, None)
             self._request_exchanges.pop(request_id, None)
+            self._request_web.pop(request_id, None)
             self._transport_closed.pop(request_id, None)
             self._answer_streams.pop(request_id, None)
             self._cancelled_query_ids.discard(request_id)
@@ -1114,6 +1187,142 @@ class AxiomLMApp(App):
                 queued = self.queued_query
                 self.queued_query = None
                 await self._submit_question(*queued)
+
+    async def _agent_counter(self, model, record):
+        """Chat accounting gates the agent; unvalidated models keep the Phase 2 path."""
+        if not self._agent_routing:
+            return None
+        from .chat_tokens import load_chat_counter
+
+        try:
+            return await asyncio.to_thread(load_chat_counter, model)
+        except (ValueError, OSError, HTTPError) as exc:
+            record.steps.append(
+                f"↳ tools unavailable for {model} · {exc} · Phase 2 path"
+            )
+            return None
+
+    def _ensure_sandbox(self):
+        # One warm supervisor per session; a cancelled call stops only its child.
+        if self._sandbox is None:
+            from .sandbox.client import SandboxClient
+
+            self._sandbox = SandboxClient(request_prefix="tui")
+        return self._sandbox
+
+    async def _close_sandbox(self):
+        sandbox, self._sandbox = self._sandbox, None
+        if sandbox is not None:
+            try:
+                await sandbox.aclose()
+            except Exception as exc:  # noqa: BLE001
+                await self.write_line(
+                    f"✗ sandbox cleanup could not be confirmed: {exc}"
+                )
+
+    def _agent_events(
+        self, request_id, query, book, model, rewritten, k, distance, counter, client
+    ):
+        from .agent import AgentRequest, run_agent
+        from .tools.web import WebTools
+
+        history = tuple(
+            turn
+            for exchange in self._request_exchanges.get(request_id, ())
+            if exchange.book_stem == book
+            for turn in (
+                {"role": "user", "content": exchange.question},
+                {"role": "assistant", "content": exchange.answer},
+            )
+        )
+        request = AgentRequest(
+            request_id,
+            query,
+            book,
+            model,
+            history=history,
+            web_enabled=self._request_web.get(request_id, False),
+            top_k=k,
+            distance=distance,
+            retrieval_query=rewritten.retrieval_query,
+        )
+        return run_agent(
+            request,
+            client=client,
+            sandbox=self._ensure_sandbox(),
+            counter=counter,
+            web=WebTools(),
+        )
+
+    def _apply_agent_event(
+        self, request_id, event, record, view, buffer, pending, book, started
+    ):
+        """Render one agent event; returns "DONE", a failure line, or None."""
+        data = event.data
+        if event.kind == "token":
+            pending.append(buffer.feed(data["text"]))
+            record.raw_answer = buffer.raw
+            record.copy_text = buffer.visible
+            record.copy_is_sanitized = record.copy_text != record.raw_answer
+            if record.phase != "STREAMING":
+                record.steps.append(f"↳ thinking ✓ {time.monotonic()-started:.1f}s")
+                view.step_line.update("\n".join(record.steps))
+            record.phase = "STREAMING"
+            self._status = "▌ writing"
+            return None
+        if event.kind == "sources":
+            sources = []
+            for ref in data["sources"]:
+                source = (
+                    SourceRef(book, None, None, None, (), "web", ref.url, ref.title)
+                    if ref.kind == "web"
+                    else SourceRef(
+                        book,
+                        ref.physical_pages[0] if ref.physical_pages else None,
+                        ref.chapter,
+                        ref.section,
+                        ref.physical_pages,
+                    )
+                )
+                if source not in sources:
+                    sources.append(source)
+            record.sources = sources
+            self._last_retrieved_pages = sorted(
+                {p for s in sources for p in s.physical_pages}
+            )
+            return None
+        elapsed = f"{time.monotonic()-started:.1f}s"
+        if event.kind == "step":
+            stage = data["stage"]
+            line = {
+                "route": f"↳ route {data.get('mode')}",
+                "local_search_done": f"↳ search_local_index {data.get('status')} · {data.get('passages')} passages · {elapsed}",
+                "assessment": f"↳ local evidence {'sufficient' if data.get('sufficient') else 'insufficient'} · {data.get('reason', '')}",
+                "compute_done": f"↳ execute_python {data.get('status')} · {data.get('result')}",
+                "verify_done": f"↳ verify {data.get('status')} · {data.get('reason')}",
+                "optional_web": "↳ web_search …",
+            }.get(stage)
+            if line:
+                record.steps.append(line)
+            phase = {
+                "local_search": "RETRIEVING",
+                "compute": "COMPUTING",
+                "final": "THINKING",
+            }
+            record.phase = phase.get(stage, record.phase)
+            view.step_line.update("\n".join(record.steps[-3:]) + f"\n↳ {stage} …")
+            return None
+        if event.kind == "result":
+            verification = data.get("verification")
+            if verification:
+                record.steps.append(f"↳ verification {verification['status']}")
+            record.steps.append(
+                f"↳ {data['model_requests']} model requests · {data['tool_calls']} tool calls · {elapsed}"
+            )
+            if not data["complete"]:
+                return "✗ answer reached the output limit and is incomplete · /retry"
+            return "DONE"
+        return f"✗ {data.get('message', 'agent error')} · /retry"
 
     async def _cancel_active_query(self):
         request_id = self._active_query_request_id
@@ -1152,14 +1361,32 @@ class AxiomLMApp(App):
             return self.write_line(f"○ usage: {spec.name} {spec.usage}".rstrip())
 
         if name in {"/thinking", "/web"}:
-            allowed = {"on", "off", "show"} if name == "/thinking" else {"on", "off"}
-            if len(arguments) != 1 or arguments[0] not in allowed:
+            if len(arguments) != 1 or arguments[0] not in {"on", "off", "show"}:
                 await usage()
-            else:
+            elif name == "/thinking":
                 await self.write_line(
-                    f"○ {name[1:]} off"
-                    if arguments[0] == "off"
-                    else f"○ {name} is available in Phase {spec.available_phase}"
+                    "○ thinking is automatic: on for the solve computation step, off for Q&A"
+                    + ("" if arguments[0] == "show" else " · not changed")
+                )
+            elif arguments[0] == "show":
+                endpoint = "configured" if config.WEB_SEARCH_URL else "not configured"
+                await self.write_line(
+                    f"○ web evidence {'on' if self.web_enabled else 'off'}"
+                    f" · search endpoint {endpoint} · retrieval only, no cloud inference"
+                )
+            elif self._busy() or self.queued_query:
+                await self.write_line(
+                    "○ web permission is locked while work is pending"
+                )
+            else:
+                self.web_enabled = arguments[0] == "on"
+                await self.write_line(
+                    f"○ web evidence {arguments[0]}"
+                    + (
+                        " · no search endpoint configured (WEB_SEARCH_URL)"
+                        if self.web_enabled and not config.WEB_SEARCH_URL
+                        else ""
+                    )
                 )
             return
         if spec.available_phase > 1:
@@ -1443,6 +1670,9 @@ class AxiomLMApp(App):
 
     async def _copy(self, text):
         ok, message = await asyncio.to_thread(copy_text, self, text)
+        if ok:
+            # Native TextArea paste reads Textual's local clipboard.
+            self._clipboard = text
         lines = message.splitlines()
         if ok and lines[-1].startswith("copied "):
             for line in lines[:-1]:
@@ -1712,6 +1942,7 @@ class AxiomLMApp(App):
             except (WorkerCancelled, WorkerFailed):
                 pass
         await asyncio.to_thread(self._release_model_owners)
+        await self._close_sandbox()
         self.motion.stop()
         self.exit()
 
@@ -1824,31 +2055,21 @@ class AxiomLMApp(App):
         answer_token_counter=None,
     ):
         from .answer_tokens import load_answer_counter
-        from .hybrid_retrieval import retrieve_hybrid, select_context
-        from .index_store import resolve_index
+        from .hybrid_retrieval import select_context
+        from .retrieval import search_book
 
-        index = resolve_index(book_stem)
-        retrieval_query = query if retrieval_query is None else retrieval_query
-        target = self.extract_page_intent(query)
-        page_filter = (min(target), max(target)) if target else None
-        candidates = retrieve_hybrid(
-            index,
-            retrieval_query,
-            page_filter,
-            config.HYBRID_DENSE_FETCH,
-            config.HYBRID_BM25_FETCH,
-            distance_threshold=distance_threshold,
+        found = search_book(
+            query,
+            book_stem=book_stem,
+            distance=distance_threshold,
+            retrieval_query=retrieval_query,
         )
-        fallback = bool(target and not candidates)
-        if fallback:
-            candidates = retrieve_hybrid(
-                index,
-                retrieval_query,
-                None,
-                config.HYBRID_DENSE_FETCH,
-                config.HYBRID_BM25_FETCH,
-                distance_threshold=distance_threshold,
-            )
+        candidates, fallback, overview = (
+            list(found.candidates),
+            found.page_fallback,
+            found.overview,
+        )
+        retrieval_query = found.retrieval_query
 
         def prompt_for(rows):
             context = (
@@ -1858,9 +2079,15 @@ class AxiomLMApp(App):
                 )
                 or "No direct context retrieved from indexed files."
             )
-            return PROMPT_TEMPLATE.format(
+            prompt = PROMPT_TEMPLATE.format(
                 book=book_stem, history=history_str, context=context, question=query
             )
+            if overview:
+                prompt = prompt.replace(
+                    f"Current question: {query}\n\nEvidence rules",
+                    f"Original user wording: {query}\n\nCurrent question: What is this book about?\n\nEvidence rules",
+                )
+            return prompt
 
         counter = answer_token_counter or load_answer_counter(
             model or self.selected_model
@@ -1884,11 +2111,12 @@ class AxiomLMApp(App):
                 bm25_score=c.bm25_score if c.bm25_score is not None else "—",
                 index_mode=(
                     "dense-only legacy · rebuild for hybrid"
-                    if index.legacy
+                    if found.legacy
                     else "hybrid"
                 ),
                 page_filter_fallback=str(fallback),
-                index_version=index.version_id,
+                index_version=found.index_version,
+                retrieval_query=retrieval_query,
             )
             for c in selected
         ]

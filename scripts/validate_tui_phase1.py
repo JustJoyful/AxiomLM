@@ -70,6 +70,9 @@ async def validate() -> dict[str, Any]:
         def _prepare_query(self, query, *_args):
             return query, [], [], []
 
+        async def _agent_counter(self, model, record):
+            return None  # Phase 1 diagnostics measure the toolless stream path.
+
         def _display(self, screen, renderable):
             if renderable is not None and self._active_query_request_id:
                 now = time.monotonic()

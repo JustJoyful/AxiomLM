@@ -31,6 +31,7 @@ async def validate() -> dict[str, bool | str]:
     ollama_client = tui.OllamaClient
     tui.OllamaClient = Client
     app = tui.AxiomLMApp()
+    app._agent_routing = False  # validates the Phase 2 path
     app.active_collection_name = "phase0_probe"
     app._discover_books = lambda: {"phase0_probe": 1}
     app._fetch_ollama_models = lambda: [tui.OLLAMA_MODEL]

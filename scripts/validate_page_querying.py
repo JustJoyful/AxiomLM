@@ -38,6 +38,7 @@ def _validate_tui_followup_citation_wiring() -> bool:
 
     async def probe():
         app = tui.AxiomLMApp()
+        app._agent_routing = False  # validates the Phase 2 path
         app.active_collection_name = "other_active_book"
         app._last_retrieved_pages = [91]
         app._last_chunks = ["STALE CACHED CONTEXT"]
