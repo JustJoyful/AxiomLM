@@ -283,6 +283,36 @@ def test_lint_reports_missed_labelled_pages():
     ]
 
 
+def test_lint_contradiction_answers_must_reject_the_premise():
+    question = (
+        "Since the book says interpreters never evaluate expressions, why does it "
+        "call them evaluators?"
+    )
+    case = {"kind": "contradiction"}
+    rejected = (
+        "The premise is incorrect: the book says the interpreter evaluates "
+        "expressions in a read-eval-print loop."
+    )
+    assert lint(rejected, question=question, case=case) == []
+    quoted = "The claim that interpreters never evaluate expressions is not true."
+    assert lint(quoted, question=question, case=case) == []
+    # Run 07 offline and online case 12.
+    accepted = (
+        "The book clarifies that while the interpreter itself never evaluates "
+        "expressions in the sense of executing them directly, it acts as an evaluator."
+    )
+    assert lint(accepted, question=question, case=case) == [
+        "premise not rejected",
+        "premise restated without negation: evaluate",
+    ]
+    softened = "Interpreters do not evaluate expressions in that sense. It is wrong."
+    assert lint(softened, question=question, case=case) == [
+        "premise restated without negation: evaluate"
+    ]
+    # Other case kinds are not checked.
+    assert lint(accepted, question=question) == []
+
+
 def test_lints_never_change_passed():
     import inspect
 

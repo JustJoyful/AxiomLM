@@ -118,6 +118,32 @@ def summarize(policy: list[dict]) -> dict:
 _INTERNAL_TERMS = re.compile(r"\b(sandbox|trace|local search|tools?)\b", re.IGNORECASE)
 _PAGE_AS_SECTION = re.compile(r"\bSection \d{3,}\b")
 _DISCLAIMER = re.compile(r"\bdoes not (?:cover|contain)\b", re.IGNORECASE)
+_REJECTION = re.compile(
+    r"\b(?:incorrect|not (?:true|correct|accurate)|false|wrong|mistaken|"
+    r"contradicts?|the book does not say)\b",
+    re.IGNORECASE,
+)
+_NEGATED_CLAIM = re.compile(
+    r"\b(?:never|not|cannot|can't|don't|doesn't)\s+(\w+)", re.IGNORECASE
+)
+
+
+def premise_lints(answer: str, question: str) -> list[str]:
+    """A contradiction case must reject its premise, never restate it as true."""
+    lints = []
+    if not _REJECTION.search(answer):
+        lints.append("premise not rejected")
+    for verb in {m.lower() for m in _NEGATED_CLAIM.findall(question)}:
+        stem = re.escape(verb.rstrip("s"))
+        restated = re.compile(
+            rf"\b(?:never|do not|does not|don't|doesn't|cannot)\s+{stem}\w*",
+            re.IGNORECASE,
+        )
+        for sentence in re.split(r"(?<=[.!?])\s+", answer):
+            if restated.search(sentence) and not _REJECTION.search(sentence):
+                lints.append(f"premise restated without negation: {verb}")
+                break
+    return lints
 
 
 def answer_lints(row: dict, case: dict | None = None) -> list[str]:
@@ -142,6 +168,8 @@ def answer_lints(row: dict, case: dict | None = None) -> list[str]:
         lints.append("web sources fetched but not used in the answer")
     if labelled - retrieved:
         lints.append(f"labelled pages not retrieved: {sorted(labelled - retrieved)}")
+    if case.get("kind") == "contradiction":
+        lints += premise_lints(answer, row.get("question") or case.get("question", ""))
     return lints
 
 
