@@ -353,6 +353,18 @@ def _sympy_text(text: str) -> str:
     return re.sub(r"\)\s*([a-z\d(])", r")*\1", text)  # (x+1)(x-1)
 
 
+_SQUARE_ROOT = re.compile(r"\bsquare root of (\d+(?:\.\d+)?)\b", re.IGNORECASE)
+
+
+def fallback_code(question: str) -> str | None:
+    """Trusted host code for a recognised numeric question, used only when every
+    model-written computation failed (run 07: Scheme syntax in Python)."""
+    match = _SQUARE_ROOT.search(question)
+    if not match:
+        return None
+    return f"result = sympy.N(sympy.sqrt(sympy.Rational('{match.group(1)}')), 15)"
+
+
 def question_check(question: str) -> VerificationCheck | None:
     """Derive a supported check from the original question text, or None."""
     for kind, pattern in _QUESTION_FORMS:
@@ -729,6 +741,21 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
             and not precision_shortfall(request.question, computed_value(better))
         ):
             computation = better
+    code = fallback_code(request.question)
+    web_calls = 2 if request.web_enabled else 0
+    if (
+        not computed_value(computation)
+        and code
+        and run.tool_calls + 1 + web_calls <= config.AGENT_MAX_TOOL_CALLS
+    ):
+        fallback = await run.tool(
+            "compute_fallback",
+            "execute_python",
+            {"code": code},
+            frozenset({"execute_python"}),
+        )
+        if computed_value(fallback):
+            computation = fallback
     if computation is None:
         computation = ToolResult(
             "none",

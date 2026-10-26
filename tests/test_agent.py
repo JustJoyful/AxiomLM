@@ -979,11 +979,14 @@ async def test_length_stop_does_not_spend_the_repair_round():
     assert "A computation returned: 1.414214." in final
 
 
+CUBE = "Using Newton's method, what is the cube root of 2 to six decimal places?"
+
+
 async def test_no_computed_value_never_invites_an_estimate():
     code = call("execute_python", code="result = broken()")
     client = Client(sqrt_script(code, code))
     _, last = await collect(
-        request=AgentRequest("r", SQRT, "sicp", "m"),
+        request=AgentRequest("r", CUBE, "sicp", "m"),
         client=client,
         sandbox=FailsUntil(2),
         counter=Counter(),
@@ -1113,3 +1116,33 @@ async def test_precision_recompute_that_does_not_help_keeps_the_first_value():
     )
     final = client.requests[-1]["messages"][-1]["content"]
     assert "1.41421 (only 5 decimal places were computed)" in final
+
+
+async def test_recognised_numeric_question_gets_a_host_fallback_when_code_fails():
+    sandbox = FailsUntil(2, value="1.41421356237310")
+    code = call("execute_python", code="def good_enough?(g): pass")
+    client = Client(sqrt_script(code, code))
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=sandbox,
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    assert sandbox.executed[-1] == (
+        "result = sympy.N(sympy.sqrt(sympy.Rational('2')), 15)"
+    )
+    assert any(r["stage"] == "compute_fallback" for r in last.data["trace"])
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 1.414214 (rounded from 1.41421356237310)." in final
+    # No extra model request: the fallback is host code.
+    assert last.data["model_requests"] == 5
+
+
+def test_fallback_code_only_for_recognised_forms():
+    from src.agent import fallback_code
+
+    assert fallback_code("What is the square root of 2.25?") == (
+        "result = sympy.N(sympy.sqrt(sympy.Rational('2.25')), 15)"
+    )
+    assert fallback_code("Differentiate x^2") is None
