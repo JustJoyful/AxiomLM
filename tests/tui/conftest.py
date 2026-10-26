@@ -11,6 +11,8 @@ def app_factory(monkeypatch, tmp_path):
     monkeypatch.delenv("AXIOM_THEME", raising=False)
     monkeypatch.setenv("COLORTERM", "truecolor")
 
+    # Phase 2 path tests stay pinned; agent turns opt in explicitly.
+    monkeypatch.setattr(config, "AGENT_ROUTING_ENABLED", False)
     monkeypatch.setattr(config, "UI_CONFIG_PATH", tmp_path / "config.toml")
     monkeypatch.setattr(config, "UI_THEMES_DIR", tmp_path / "themes")
     monkeypatch.setattr(tui, "list_collections", list)

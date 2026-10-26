@@ -1,3 +1,5 @@
+import pytest
+
 from src import clipboard
 
 
@@ -113,3 +115,62 @@ def test_daemon_clipboard_does_not_hold_a_captured_stderr_pipe(monkeypatch, tmp_
                 os.kill(int(child_pid.read_text()), signal.SIGTERM)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize("key", ["ctrl+c", "ctrl+shift+c", "super+c"])
+async def test_ctrl_c_copies_native_selection_instead_of_arming_quit(
+    app_factory, monkeypatch, key
+):
+    from src.ui.stream import StudyStream, TurnRecord, TurnView
+
+    app = app_factory()
+    copied = []
+    monkeypatch.setattr(
+        clipboard.subprocess,
+        "run",
+        lambda args, **kwargs: copied.append(kwargs["input"]),
+    )
+    monkeypatch.setenv("WAYLAND_DISPLAY", "test")
+    monkeypatch.setattr(
+        clipboard.shutil,
+        "which",
+        lambda name: "/usr/bin/wl-copy" if name == "wl-copy" else None,
+    )
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._hide_home()
+        record = TurnRecord("copy", "Question", "book", "model", phase="DONE")
+        record.set_answer("Selected answer")
+        view = TurnView(record)
+        await app.query_one(StudyStream).add_turn(view)
+        await pilot.pause()
+        await pilot.mouse_down(view.question, offset=(0, 0))
+        await pilot.hover(view.answer, offset=(7, 0))
+        await pilot.mouse_up(view.answer, offset=(7, 0))
+        selected = app.screen.get_selected_text()
+        assert selected and "Question" in selected
+        await pilot.press(key)
+        await pilot.pause()
+        assert copied == [selected.encode()]
+        assert app._last_interrupt == 0
+        assert not app._exit
+
+
+async def test_selected_prompt_copy_pastes_back_into_composer(app_factory, monkeypatch):
+    from src.ui.prompt import QueryComposer
+
+    monkeypatch.setenv("WAYLAND_DISPLAY", "test")
+    monkeypatch.setattr(
+        clipboard.shutil,
+        "which",
+        lambda name: "/usr/bin/wl-copy" if name == "wl-copy" else None,
+    )
+    monkeypatch.setattr(clipboard.subprocess, "run", lambda *args, **kwargs: None)
+    app = app_factory()
+    async with app.run_test() as pilot:
+        composer = app.query_one(QueryComposer)
+        composer.load_text("copy this λ")
+        composer.select_all()
+        await pilot.press("ctrl+c")
+        composer.move_cursor(composer.document.end)
+        await pilot.press("ctrl+v")
+        assert composer.text == "copy this λcopy this λ"
