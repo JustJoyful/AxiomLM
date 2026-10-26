@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "book_stem": "sicp",
+  "frozen_utc": "2026-10-26T00:00:00+00:00",
+  "review": {
+    "status": "unreviewed",
+    "drafted_by": "Claude (AI coding agent), 2026-10-26",
+    "note": "Expected tool orders and math checks are policy labels, not maintainer-reviewed answers. Page labels for Phase 2 cases come from the source-checked Phase 2 fixture."
+  },
+  "phase2_reference": {
+    "path": "tests/fixtures/phase2/sicp_context_labels.json",
+    "sha256": "181de24a5ed7e2590aa936a03b7bde6265dc31039521e5d356a228317fe10040",
+    "case_ids": ["interpreter", "interpreter_example", "physical_page_one", "book_scope", "outside_book", "interpreter_paraphrase", "expressions_to_names", "procedures_and_data"],
+    "expected_mode": "qa",
+    "expected_tools_prefix": ["search_local_index"],
+    "web_expected": {"outside_book": "only when web is on and configured; otherwise honest offline abstention"}
+  },
+  "cases": [
+    {
+      "case_id": "deriv_polynomial",
+      "kind": "solve",
+      "question": "Using the book's symbolic differentiation approach, what is the derivative of x^3 + 2x with respect to x?",
+      "relevant_pages": [225, 226, 227, 228, 229],
+      "expected_mode": "solve",
+      "expected_stage_order": ["classify", "local_search", "local_assessment", "compute", "verify", "final"],
+      "verification_check": {"kind": "derivative", "expression": "x**3 + 2*x", "candidate": "3*x**2 + 2", "variable": "x"},
+      "expected_check_status": "verified",
+      "web_expected": false
+    },
+    {
+      "case_id": "quadratic_roots",
+      "kind": "solve_missing_pdf",
+      "question": "Solve x^2 - 5x + 6 = 0 and check each root.",
+      "relevant_pages": [],
+      "expected_mode": "solve",
+      "expected_stage_order": ["classify", "local_search", "local_assessment", "compute", "verify", "final"],
+      "verification_check": {"kind": "substitution", "expression": "x**2 - 5*x + 6", "candidate": "2", "variable": "x"},
+      "expected_check_status": "verified",
+      "web_expected": false,
+      "note": "No book worked example is expected; computation and verification must still run."
+    },
+    {
+      "case_id": "sqrt_newton",
+      "kind": "solve",
+      "question": "Using Newton's method as the book describes for square roots, what is the square root of 2 to six decimal places?",
+      "relevant_pages": [57, 58, 59, 60, 61],
+      "expected_mode": "solve",
+      "expected_stage_order": ["classify", "local_search", "local_assessment", "compute", "verify", "final"],
+      "verification_check": null,
+      "expected_check_status": "unverified",
+      "web_expected": "only_on_failure_when_enabled",
+      "note": "Decimal approximations are outside the conservative trusted checker; the answer must not be labeled verified."
+    },
+    {
+      "case_id": "contradiction_premise",
+      "kind": "contradiction",
+      "question": "Since the book says interpreters never evaluate expressions, why does it call them evaluators?",
+      "relevant_pages": [796, 797, 855],
+      "expected_mode": "qa",
+      "expected_stage_order": ["classify", "local_search", "local_assessment", "final"],
+      "verification_check": null,
+      "web_expected": false,
+      "note": "The false premise must be corrected from book evidence."
+    },
+    {
+      "case_id": "offline_outside_book",
+      "kind": "offline",
+      "question": "What is the latest stable release of the Racket language?",
+      "relevant_pages": [],
+      "expected_mode": "qa",
+      "expected_stage_order": ["classify", "local_search", "local_assessment", "final"],
+      "verification_check": null,
+      "web_expected": "only_when_enabled",
+      "note": "With web off or unconfigured, the answer must say the book does not cover it and web is unavailable; no invented version."
+    }
+  ]
+}
