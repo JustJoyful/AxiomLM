@@ -1162,3 +1162,26 @@ async def test_rounded_value_replaces_raw_output_that_misrounds():
     final = client.requests[-1]["messages"][-1]["content"]
     assert "Computation output:\n1.414214 (rounded from 1.414213562373095)" in final
     assert "To six decimal places: 1.41421" not in final
+
+
+async def test_symbolic_value_for_a_decimal_question_is_recomputed_then_falls_back():
+    class Symbolic(Sandbox):
+        async def execute(self, code):
+            self.executed.append(code)
+            value = "1.41421356237310" if "Rational" in code else "sqrt(2)"
+            return PythonResult("r", "ok", value=value)
+
+    code = call("execute_python", code="result = sympy.sqrt(2)")
+    client = Client(sqrt_script(code, code))
+    sandbox = Symbolic()
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=sandbox,
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    stages = [r["stage"] for r in last.data["trace"] if "stage" in r]
+    assert "compute_precision" in stages and "compute_fallback" in stages
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 1.414214 (rounded from 1.41421356237310)." in final

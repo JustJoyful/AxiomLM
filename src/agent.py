@@ -205,9 +205,10 @@ def most_precise(value: str | None) -> str | None:
 def precision_shortfall(question: str, value: str | None) -> tuple[int, int] | None:
     """(digits computed, places asked) when a number has fewer decimals than asked."""
     places, source = requested_places(question), most_precise(value)
-    if places is None or source is None:
+    if places is None or not value:
         return None
-    digits = len(source.partition(".")[2])
+    # A symbolic value such as sqrt(2) has no decimals at all (run 07-final).
+    digits = len(source.partition(".")[2]) if source else 0
     return (digits, places) if digits < places else None
 
 
@@ -358,7 +359,8 @@ _SQUARE_ROOT = re.compile(r"\bsquare root of (\d+(?:\.\d+)?)\b", re.IGNORECASE)
 
 def fallback_code(question: str) -> str | None:
     """Trusted host code for a recognised numeric question, used only when every
-    model-written computation failed (run 07: Scheme syntax in Python)."""
+    model-written computation failed or lacks the asked precision (run 07: Scheme
+    syntax in Python; a symbolic sqrt(2))."""
     match = _SQUARE_ROOT.search(question)
     if not match:
         return None
@@ -743,8 +745,11 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
             computation = better
     code = fallback_code(request.question)
     web_calls = 2 if request.web_enabled else 0
+    unusable = not computed_value(computation) or precision_shortfall(
+        request.question, computed_value(computation)
+    )
     if (
-        not computed_value(computation)
+        unusable
         and code
         and run.tool_calls + 1 + web_calls <= config.AGENT_MAX_TOOL_CALLS
     ):
@@ -754,7 +759,9 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
             {"code": code},
             frozenset({"execute_python"}),
         )
-        if computed_value(fallback):
+        if computed_value(fallback) and not precision_shortfall(
+            request.question, computed_value(fallback)
+        ):
             computation = fallback
     if computation is None:
         computation = ToolResult(
