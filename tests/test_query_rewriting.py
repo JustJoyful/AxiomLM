@@ -98,3 +98,19 @@ async def test_timeout_falls_back_and_cancellation_propagates_after_cleanup(erro
         )
         assert result.retrieval_query == "What is it?" and result.fallback_reason
     assert cleaned == [True]
+
+
+@pytest.mark.asyncio
+async def test_book_overview_query_is_traced_without_retrieved_evidence():
+    class Client:
+        async def agenerate(self, *args, **kwargs):
+            raise AssertionError(
+                "Recognized overview intent does not need a model rewrite"
+            )
+
+    result = await rewrite.rewrite_followup(
+        "What this book about brocacho", [], "book", model="local", client=Client()
+    )
+    assert result.original_question == "What this book about brocacho"
+    assert result.applied
+    assert "preface" in result.retrieval_query and "purpose" in result.retrieval_query

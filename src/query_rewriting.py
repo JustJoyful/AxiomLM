@@ -1,4 +1,4 @@
-"""Bounded local rewriting for explicit continuation cues in completed turns."""
+"""Normalize whole-book intent and rewrite continuations from completed turns."""
 
 from __future__ import annotations
 
@@ -30,6 +30,18 @@ class RewriteResult:
     fallback_reason: str | None
 
 
+def is_book_overview(question: str) -> bool:
+    """Recognize an unqualified whole-book request, including casual address."""
+    return bool(
+        re.fullmatch(
+            r"\s*what(?:\s+is|['’]s)?\s+(?:this|the)\s+(?:text)?book\s+about"
+            r"[\s,?!]*(?:(?:bro(?:cacho)?|dude|mate|please)[\s?!.]*)?",
+            question,
+            re.IGNORECASE,
+        )
+    )
+
+
 def should_rewrite_followup(
     question: str, completed_exchanges: Sequence[ConversationExchange], book_stem: str
 ) -> bool:
@@ -57,6 +69,8 @@ async def rewrite_followup(
     model: str,
     client: OllamaClient,
 ) -> RewriteResult:
+    if is_book_overview(question):
+        return RewriteResult(question, config.BOOK_OVERVIEW_RETRIEVAL_QUERY, True, None)
     if not should_rewrite_followup(question, completed_exchanges, book_stem):
         return RewriteResult(question, question, False, "not an eligible follow-up")
     history = []

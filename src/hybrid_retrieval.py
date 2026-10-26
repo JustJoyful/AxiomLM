@@ -12,6 +12,7 @@ from itertools import zip_longest
 
 from src import config, db
 from src.index_store import IndexHandle
+from src.query_rewriting import is_book_overview
 
 
 @dataclass(frozen=True)
@@ -181,7 +182,7 @@ def retrieve_hybrid(
 
 
 def is_broad_question(question: str) -> bool:
-    return bool(
+    return is_book_overview(question) or bool(
         re.search(
             r"\b(?:overview|summarize|compare|contrast|relationship|across chapters|what is this book about)\b|\bhow do\b.*\brelate\b",
             question,

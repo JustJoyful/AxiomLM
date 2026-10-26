@@ -141,3 +141,65 @@ def test_real_pair_filter_refill_and_index_policy_precede_each_embedding(
         handle, "arithmetic", None, 2, 2, candidate_limit=15
     )
     assert len(filled) == 15
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What this book about brocacho",
+        "What's this textbook about?",
+        "What is this book about?",
+    ],
+)
+def test_informal_book_overviews_receive_broad_context(question):
+    assert hybrid.is_broad_question(question)
+
+
+def test_overview_search_and_answer_keep_original_wording(tmp_path, monkeypatch):
+    from src import db, index_store, tui
+    from src.late_chunking import EmbeddedChunk
+
+    rows = [
+        EmbeddedChunk(
+            str(i),
+            "The book introduces methods for controlling complexity.",
+            {
+                "book_stem": "book",
+                "physical_page": i + 1,
+                "physical_page_start": i + 1,
+                "physical_page_end": i + 1,
+                "physical_pages": f"[{i+1}]",
+            },
+            [1.0] + [0.0] * 767,
+        )
+        for i in range(6)
+    ]
+    index_store.build_index_version("book", rows, root=tmp_path)
+    resolve = index_store.resolve_index
+    monkeypatch.setattr(
+        index_store, "resolve_index", lambda book: resolve(book, root=tmp_path)
+    )
+    queries = []
+
+    def embed(query, *, prompt_policy):
+        queries.append(query)
+        return [1.0] + [0.0] * 767
+
+    monkeypatch.setattr(db, "embed_query", embed)
+    question = "What this book about brocacho"
+    prompt, metadata, _pages, ids = tui.AxiomLMApp()._prepare_query(
+        question, "", "book", 3, 1.5, answer_token_counter=lambda p: len(p) // 4
+    )
+    assert len(ids) == 5
+    assert "preface" in queries[0] and "purpose" in queries[0]
+    assert "Original user wording: What this book about brocacho" in prompt
+    assert "Current question: What is this book about?" in prompt
+    assert all(m["retrieval_query"] == queries[0] for m in metadata)
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["What is this book about quantum mechanics?", "Summarize physical PDF page 1."],
+)
+def test_overview_intent_does_not_erase_qualifiers_or_page_requests(question):
+    assert not hybrid.is_book_overview(question)
