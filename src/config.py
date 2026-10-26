@@ -167,6 +167,9 @@ HYBRID_BM25_FETCH = 30
 HYBRID_FETCH_BATCH = 15
 HYBRID_MAX_FETCH = 100
 BROAD_CONTEXT_MIN_CHUNKS = 5
+BOOK_OVERVIEW_RETRIEVAL_QUERY = (
+    "book overview main topics purpose approach introduction preface"
+)
 BROAD_CONTEXT_MAX_CHUNKS = PHASE2_BROAD_MAX_CHUNKS
 PHASE2_AFTER_EVALUATION_PATH = LOGS_DIR / "phase2_context_after_evaluation.json"
 INDEX_WRITE_BATCH_SIZE = 100
@@ -180,3 +183,102 @@ ANSWER_TOKENIZER_MODEL_DIGEST = (
 ANSWER_TOKENIZER_OLLAMA_VERSION = "0.40.4"
 ANSWER_PROMPT_PREFIX = "<|im_start|>user\n"
 ANSWER_PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+# Phase 3 native Python sandbox limits; host acceptance is independently required.
+PYTHON_MEMORY_BYTES = 262144000
+PYTHON_MAX_TASKS = 32
+PYTHON_RESPONSE_SECONDS = 5.0
+PYTHON_CLEANUP_SECONDS = 1.0
+PYTHON_STARTUP_SECONDS = 15.0
+PYTHON_MAX_CODE_BYTES = 8192
+PYTHON_MAX_OUTPUT_BYTES = 8192
+PYTHON_MAX_FRAME_BYTES = 65536
+PYTHON_MAX_ID_CHARS = 128
+PYTHON_SCRATCH_BYTES = 33554432
+SYMPY_CACHE_SIZE = 128
+# Native modules needed for the stdlib/SymPy worker; GUI/test/db extensions excluded.
+PYTHON_EXTENSION_MODULES = frozenset(
+    {
+        "_asyncio",
+        "_bisect",
+        "_blake2",
+        "_bz2",
+        "_contextvars",
+        "_csv",
+        "_ctypes",
+        "_datetime",
+        "_decimal",
+        "_hashlib",
+        "_heapq",
+        "_json",
+        "_lzma",
+        "_md5",
+        "_multiprocessing",
+        "_opcode",
+        "_pickle",
+        "_posixshmem",
+        "_posixsubprocess",
+        "_queue",
+        "_random",
+        "_sha1",
+        "_sha256",
+        "_sha3",
+        "_sha512",
+        "_socket",
+        "_ssl",
+        "_struct",
+        "_typing",
+        "_uuid",
+        "array",
+        "binascii",
+        "cmath",
+        "fcntl",
+        "math",
+        "mmap",
+        "pyexpat",
+        "select",
+        "unicodedata",
+        "zlib",
+        "_statistics",
+        "resource",
+        "_elementtree",
+        "termios",
+    }
+)
+
+PYTHON_POLL_SECONDS = 0.01
+
+# Phase 3 agent routing in the TUI; unvalidated models fall back to the Phase 2 path.
+AGENT_ROUTING_ENABLED = True
+# Phase 3 agent runtime caps: starting values to measure, not throughput guarantees.
+AGENT_MAX_MODEL_REQUESTS = 6
+AGENT_MAX_TOOL_CALLS = 6
+AGENT_MAX_CALLS_PER_MESSAGE = 2
+AGENT_REQUEST_SECONDS = 120.0
+AGENT_ROUTER_OUTPUT_TOKENS = 256
+AGENT_FINAL_OUTPUT_TOKENS = 768
+# Native chat accounting is valid only for this digest/runtime pair after the probe.
+CHAT_TOKENIZER_MODEL_DIGEST = ANSWER_TOKENIZER_MODEL_DIGEST
+CHAT_TOKENIZER_OLLAMA_VERSION = ANSWER_TOKENIZER_OLLAMA_VERSION
+PHASE3_RUNTIME_LOGS = LOGS_DIR / "phase3_runtime"
+PHASE3_AGENT_LOGS = LOGS_DIR / "phase3_agent"
+
+# Web evidence: off by default; /web on grants retrieval permission, not cloud inference.
+WEB_ENABLED_DEFAULT = False
+# Self-hosted SearXNG (JSON format enabled) bound to loopback; None disables search.
+WEB_SEARCH_URL = "http://127.0.0.1:8888/search"
+WEB_MAX_RESULTS = 5
+WEB_REQUEST_SECONDS = 10.0
+WEB_MAX_REDIRECTS = 3
+WEB_MAX_BODY_BYTES = 1048576
+WEB_MAX_TEXT_CHARS = 12000
+WEB_ALLOWED_PORTS = frozenset({80, 443})
+TOOL_MAX_RESULT_BYTES = 16384
+TOOL_MAX_ARGUMENT_BYTES = 8192
+TOOL_QUERY_MAX_CHARS = 2048
+
+# Trusted symbolic-check parser limits (one real variable; unsupported input declines).
+MATH_MAX_EXPRESSION_CHARS = 512
+MATH_MAX_AST_NODES = 128
+MATH_MAX_INTEGER_EXPONENT = 64
+MATH_MAX_NUMERIC_DIGITS = 32
