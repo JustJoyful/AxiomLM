@@ -19,8 +19,13 @@ class SourceRef:
     chapter: str | None = None
     section: str | None = None
     physical_pages: tuple[int, ...] = ()
+    kind: str = "book"
+    url: str | None = None
+    title: str | None = None
 
     def label(self):
+        if self.kind == "web":
+            return f"web: [{self.title or self.url}]({self.url})"
         return " · ".join(
             str(value)
             for value in (
