@@ -15,7 +15,7 @@ A terminal study assistant for STEM and computer science textbooks, powered by l
 
 ## Project status
 
-Phases 0 and 1 are accepted on the development host. The command-driven Textual interface passed automated and Kitty/Alacritty checks on Niri/Wayland, including maintainer-reported physical key, drag-selection and readability checks. Phase 2 retrieval is implemented and evaluated; acceptance is withheld for a measured retrieval regression and pending claim review. Existing indexes remain in use until explicitly rebuilt. Tools/trust/study features remain planned. OCR/scanned-PDF processing is frozen.
+Phases 0 and 1 are accepted on the development host. The command-driven Textual interface passed automated and Kitty/Alacritty checks on Niri/Wayland, including maintainer-reported physical key, drag-selection and readability checks. Phase 2 is provisionally accepted by the maintainer for Phase 3 advancement (2026-10-23). Retrieval regression, bounded-answer completion and attributed claim review remain unresolved and are deferred to the final phase (Phase 6). This is not a measured quality pass. Existing indexes remain in use until explicitly rebuilt. Phase 3 agent tools are implemented (see below); their live model/latency acceptance on the development host is pending. Trust/study features remain planned. OCR/scanned-PDF processing is frozen.
 
 Core inference stays local with no silent cloud API fallback. Once models/dependencies are downloaded, the current book chat path can run offline. Planned web search/fetch are explicit evidence tools and require internet. A separate manually triggered Ask cloud button is optional, last, and outside core routing.
 
@@ -54,7 +54,7 @@ uv run --no-sync python -m src.tui
 
 `install.sh` delegates to `scripts/setup_env.sh`. Use `--cpu` for the pinned CPU Torch profile, `--no-model` to skip both the pinned Jina snapshot download and Ollama model pull, and `--dry-run` to inspect all setup commands without changing the environment. Normal setup downloads the configured Jina revision and pulls the configured Ollama model. The sync preserves separately installed optional OCR engines. Use `uv run --no-sync axiomlm` to launch the installed entry point. `pyproject.toml` declares dependencies and `uv.lock` pins their resolved versions; the installer uses `uv`'s cache rather than staging multi-gigabyte CUDA wheels in `/tmp`.
 
-The UI requires a UTF-8 interactive terminal, at least 40×12 cells (80×24 recommended). Install `wl-clipboard` for Wayland copying. Textual is pinned to 8.2.6. Bubblewrap/cgroups v2/SymPy execution and Typst export remain later-phase work. Physical compatibility across terminal applications has not yet been accepted.
+The UI requires a UTF-8 interactive terminal, at least 40×12 cells (80×24 recommended). Install `wl-clipboard` for Wayland copying. Textual is pinned to 8.2.6. With the configured model, questions run through the Phase 3 agent (book search, sandboxed SymPy computation, trusted checks, optional web evidence); other models keep the Phase 2 path. Typst export remains planned. Physical compatibility across terminal applications has not yet been accepted.
 
 ### Parse and query a book
 
@@ -70,7 +70,7 @@ Use commands in the prompt, then type a question:
 
 `/parse` accepts `--mode auto|pymupdf4llm|mineru|marker` and explicit degraded `--cpu-embeddings`. Heavy engines require their installed runtime and sufficient hardware. MinerU is installed separately. Parsing a previously indexed book builds a replacement version; previous versions and parsed checkpoints remain retained.
 
-Enter sends; Shift+Enter, Alt+Enter or Ctrl+J inserts a newline. Up/Down recalls history at the first/last line. Ctrl+P opens commands; Tab completes without executing. Escape closes an overlay first, otherwise cancels active work or clears the draft. PgUp/PgDn scroll; End resumes following output. Ctrl+L or `/clear` clears the display when idle; `/new` also clears conversation. `/quit` or two idle Ctrl+C presses exits.
+Enter sends; Shift+Enter, Alt+Enter or Ctrl+J inserts a newline. Up/Down recalls history at the first/last line. Ctrl+P opens commands; Tab completes without executing. Escape closes an overlay first, otherwise cancels active work or clears the draft. PgUp/PgDn scroll; End resumes following output. Ctrl+L or `/clear` clears the display when idle; `/new` also clears conversation. Ctrl+C copies selected conversation or prompt text; Ctrl+Shift+C and Super+C also copy selections when delivered by the terminal. With no selection, `/quit` or two idle Ctrl+C presses exits.
 
 While generating, one additional question can queue with its captured book/model; book/model changes and destructive clearing are blocked until work resolves. Cancel/error returns the queued question to the prompt. Client abort is distinct from server unload: new GPU work stays blocked until cleanup is confirmed.
 
@@ -82,7 +82,19 @@ While generating, one additional question can queue with its captured book/model
 
 `AXIOM_THEME` overrides the saved selection at startup; presence of `NO_COLOR` forces monochrome. `AXIOM_REDUCE_MOTION=1` or presence of `NO_MOTION` disables decorative motion. Terminal mode retains ANSI palette indexes; contrast depends on the terminal palette. Final Unicode math formatting waits until an active answer selection clears.
 
-`/help` lists commands. `/thinking`, `/web` and `/export` report their later-phase availability; these backends are not implemented. Practice and coverage-gap features remain planned.
+`/help` lists commands. `/web on|off|show` grants or revokes per-question permission to retrieve web evidence; it is off by default, is locked while work is pending, and does nothing until a self-hosted SearXNG JSON endpoint is set as `WEB_SEARCH_URL` in `src/config.py`. Web access is retrieval only, never cloud inference. `/thinking show` reports the automatic policy (thinking on for the solve computation step, off for Q&A and for JSON/final turns, where measured thinking exhausted the output caps); it is not user-adjustable in Phase 3. `/export` and citation verification remain unavailable (Phases 5/4). Practice and coverage-gap features remain planned.
+
+### Phase 3 agent
+
+Every question first searches the selected book. Solve questions then compute with SymPy in the native sandbox and run a separate trusted symbolic check (substitution, derivative or equivalence over one real variable); unsupported or domain-sensitive checks stay *unverified* rather than being labelled solved. Web evidence is consulted only after a failed, unverified or disputed solve, or when the book evidence is judged insufficient for Q&A, and only with `/web on`. Book sources show chapter/page; web sources show `web: [title](url)`. Every model request is counted with a native-chat token counter calibrated for the exact configured model digest and Ollama 0.40.4, must fit beside its output reserve, and runs under caps of 6 model requests, 6 tool calls and one 120 s deadline. Proof scripts:
+
+```bash
+uv run --no-sync python scripts/probe_phase3_runtime.py --output data/logs/phase3_runtime/<new-run>/report.json
+uv run --no-sync python scripts/evaluate_phase3_baseline.py sicp --output data/logs/phase3_agent/<new-run>/before.json
+uv run --no-sync python scripts/validate_phase3_agent.py sicp --baseline <before.json> --output data/logs/phase3_agent/<new-run>/after.json
+```
+
+All refuse to overwrite existing reports. Answer, citation and hallucination review stay unreviewed until attributed by a person.
 
 The CLI extraction/indexing path is:
 
@@ -111,6 +123,19 @@ Checkpoints are stored in `data/parsed_md/checkpoints/<book_stem>/page_NNNN.md`,
 
 Use `/settings`, `/k 5` (3–15) and `/d 1.5` (finite, nonnegative) for actual retrieval count and distance filtering. Defaults come from `src/config.py`. The labeled SICP comparison preserved accepted K=8 IDs; configured K=5 increased precision from 0.542 to 0.600 and reduced recall from 0.778 to 0.694 over three labeled answerable cases. Fresh stochastic answers still included unsupported claims and page-1 under-answering. These settings do not provide a quality guarantee. Versioned hybrid retrieval is implemented under Phase 2 evaluation; entailment verification remains Phase 4.
 
+### Native Python sandbox validation
+
+The Phase 3 sandbox requires Linux Bubblewrap, a user systemd manager with writable cgroups v2 delegation, `cgroup.kill`, namespaces and native pidfd support. It enforces a shared 250M memory ceiling, no swap, 32 processes and bounded scratch; unavailable prerequisites disable execution. It never executes generated code outside the sandbox. SymPy 1.14.0 is pinned directly without changing Torch profiles.
+
+Run fixed adversarial diagnostics with a new output path:
+
+```bash
+uv run --no-sync python scripts/validate_python_sandbox.py --output data/logs/phase3_sandbox/<new-run>/report.json
+AXIOM_RUN_SANDBOX_HOST_TESTS=1 uv run --no-sync pytest -q tests/sandbox
+```
+
+Reports refuse overwrite. Ordinary tests explicitly skip host cases; those skips do not establish sandbox acceptance. Each call child moves itself into its request cgroup through a guard-opened descriptor (no numeric PID migration); descendant OOM is reported as an error, and guard death tears down the sandbox through the parent-death chain. The 2026-10-26 host report passed all required checks on the development host; independent review of that repair is pending. Chat tool routing remains unavailable until the separate native-chat, thinking and context gates pass.
+
 ## Overhaul roadmap
 
 Build in order. Detailed acceptance criteria are in the maintainer's local `PRD.md`; the public scope summary is below.
@@ -136,6 +161,11 @@ src/
   tui.py             Textual app and query/ingest orchestration
   ui/                Stream, commands, themes, rendering and one axiom.tcss
   db.py              ChromaDB and Jina embedding integration
+  agent.py           Phase 3 bounded routing state machine
+  chat_tokens.py     Native-chat token accounting for the validated model
+  retrieval.py       Shared adapter over Phase 2 hybrid retrieval
+  tools/             Tool schemas, registry, book/web tools, trusted math checks
+  sandbox/           Bubblewrap/cgroups native Python sandbox
   indexer.py         Current chunking, metadata and indexing
   clipboard.py       Explicit stdin/OSC 52 clipboard transports
   ocr.py             Frozen extraction entry point
