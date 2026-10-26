@@ -143,14 +143,20 @@ FINAL = (
     "{instructions} Do not mention tools, a sandbox, traces or internal steps. "
     "Keep the whole answer under 250 words so it fits the output limit."
 )
+# First in every Q&A final prompt, ahead of the coverage note: run 07 case 12
+# accepted the premise when it came fourth, after "starting with the answer".
+PREMISE_RULE = (
+    "If the question states something the evidence contradicts, begin by saying the "
+    "premise is wrong and give what the book says; do not invent reasons for the "
+    "false premise. Never restate the false claim as true. "
+)
 QA_RULES = (
     "Answer directly from the book evidence, starting with the answer; do not open "
     "with remarks about what the evidence lacks. If a page is requested, summarize "
     'what it contains, even a title page. For a follow-up ("that", "another"), '
     "resolve what it refers to from the conversation and give an example from the "
-    "evidence. If the question assumes something false, say so, state what the book "
-    "actually says, and stop; do not invent reasons for the false premise. Say the "
-    "book does not cover the question only if no passage addresses it{web_note}."
+    "evidence. Say the book does not cover the question only if no passage "
+    "addresses it{web_note}."
 )
 SOLVE_RULES = (
     "A computation returned: {result}. Present that result and its steps. "
@@ -1003,6 +1009,7 @@ async def run_agent(
             instructions = QA_RULES.format(web_note=web_note)
             if coverage is not None:
                 instructions = COVERED_NOTE + instructions
+            instructions = PREMISE_RULE + instructions
         # Q&A gets no trace: it cost tokens and was echoed back as "the trace".
         computation_text = ""
         if computation is not None and computed_value(computation):

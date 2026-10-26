@@ -50,6 +50,43 @@ async def test_agent_qa_rules_answer_directly_and_reach_the_final_prompt():
     assert len(agent.QA_RULES) <= 600
 
 
+async def test_false_premise_rule_comes_first_whatever_the_coverage_verdict():
+    from src import agent
+    from tests.test_agent import (
+        Candidate,
+        Client,
+        Counter,
+        Sandbox,
+        collect,
+        qa_script,
+        search_with,
+    )
+
+    question = (
+        "Since the book says interpreters never evaluate expressions, why does it "
+        "call them evaluators?"
+    )
+    for sufficient in (False, True):
+        client = Client(qa_script(sufficient=sufficient))
+        await collect(
+            request=agent.AgentRequest("r", question, "sicp", "m"),
+            client=client,
+            sandbox=Sandbox(),
+            counter=Counter(),
+            search=search_with([Candidate("c", "eval", 523)], []),
+        )
+        final = client.requests[-1]["messages"][-1]["content"]
+        assert agent.PREMISE_RULE in final
+        assert (
+            "begin by saying the premise is wrong and give what the book says" in final
+        )
+        assert "Never restate the false claim as true." in final
+        # Ahead of the coverage note and the "start with the answer" rule.
+        assert final.index(agent.PREMISE_RULE) < final.index("starting with the answer")
+        if agent.COVERED_NOTE in final:
+            assert final.index(agent.PREMISE_RULE) < final.index(agent.COVERED_NOTE)
+
+
 async def test_agent_final_prompts_use_neutral_wording_and_no_qa_trace():
     from src import agent
     from tests.test_agent import (
