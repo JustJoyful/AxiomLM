@@ -27,6 +27,7 @@ dependencies = [
     "textual==8.2.6",
     "tomlkit>=0.13,<1",
     "httpx==0.28.1",
+    "sympy==1.14.0",
     "tqdm>=4.66.0"
 ]
 
