@@ -321,12 +321,18 @@ def test_lint_contradiction_answers_must_reject_the_premise():
     )
     assert lint(accepted, question=question, case=case) == [
         "premise not rejected",
-        "premise restated without negation: evaluate",
+        "premise restated without negation: evaluate expressions",
     ]
     softened = "Interpreters do not evaluate expressions in that sense. It is wrong."
     assert lint(softened, question=question, case=case) == [
-        "premise restated without negation: evaluate"
+        "premise restated without negation: evaluate expressions"
     ]
+    # Stability run r1: normal order is a true negation of a different claim.
+    normal_order = (
+        "The premise is wrong. In normal order the interpreter does not evaluate "
+        "operands until their values are needed."
+    )
+    assert lint(normal_order, question=question, case=case) == []
     # Other case kinds are not checked.
     assert lint(accepted, question=question) == []
 

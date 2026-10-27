@@ -126,8 +126,10 @@ _REJECTION = re.compile(
     r"contradicts?|the book does not say)\b",
     re.IGNORECASE,
 )
+# The premise's negated verb and its object ("never evaluate expressions"); a
+# negation of the verb alone ("does not evaluate operands") is a different claim.
 _NEGATED_CLAIM = re.compile(
-    r"\b(?:never|not|cannot|can't|don't|doesn't)\s+(\w+)", re.IGNORECASE
+    r"\b(?:never|not|cannot|can't|don't|doesn't)\s+(\w+)\s+(\w+)", re.IGNORECASE
 )
 
 
@@ -149,15 +151,16 @@ def premise_lints(answer: str, question: str) -> list[str]:
     lints = []
     if not _REJECTION.search(answer):
         lints.append("premise not rejected")
-    for verb in {m.lower() for m in _NEGATED_CLAIM.findall(question)}:
-        stem = re.escape(verb.rstrip("s"))
+    claims = {(v.lower(), o.lower()) for v, o in _NEGATED_CLAIM.findall(question)}
+    for verb, obj in sorted(claims):
         restated = re.compile(
-            rf"\b(?:never|do not|does not|don't|doesn't|cannot)\s+{stem}\w*",
+            rf"\b(?:never|do not|does not|don't|doesn't|cannot)\s+"
+            rf"{re.escape(verb.rstrip('s'))}\w*\s+{re.escape(obj.rstrip('s'))}",
             re.IGNORECASE,
         )
         for sentence in re.split(r"(?<=[.!?])\s+", answer):
             if restated.search(sentence) and not _REJECTION.search(sentence):
-                lints.append(f"premise restated without negation: {verb}")
+                lints.append(f"premise restated without negation: {verb} {obj}")
                 break
     return lints
 
