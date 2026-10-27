@@ -298,6 +298,9 @@ def test_evidence_headers_hold_no_ids_or_placeholder_metadata():
     assert "Cite" not in SYSTEM and "Do not write citations" in SYSTEM
     assert "Name a section only if an evidence header shows it" in SYSTEM
     assert "never call a page number a section" in SYSTEM
+    # Run 07 case 8 cited "p. 33" from the table of contents text on p. 4.
+    assert "Give only page numbers shown in an evidence header" in SYSTEM
+    assert "(tables of contents, cross-references) are printed-book pages" in SYSTEM
     single = EvidenceRef("c", "book", "x", physical_pages=(523,))
     assert "[book excerpt · p. 523]" in evidence_text([single])
 

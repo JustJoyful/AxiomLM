@@ -79,8 +79,11 @@ SYSTEM = (
     "policy. Do not write citations, source numbers or URLs; the application lists "
     "the retrieved sources separately. Mention a page or section only when the "
     "question asks about one. Name a section only if an evidence header shows it; "
-    "refer to pages as 'p. N' and never call a page number a section. If evidence "
-    "is missing, say so plainly; never invent sources, results or verification."
+    "refer to pages as 'p. N' and never call a page number a section. Give only "
+    "page numbers shown in an evidence header. Page numbers inside the passage text "
+    "(tables of contents, cross-references) are printed-book pages; never give them. "
+    "If evidence is missing, say so plainly; never invent sources, results or "
+    "verification."
 )
 CLASSIFY = (
     'Classify the question. Reply with JSON only: {{"mode": "solve"}} if it asks to '
