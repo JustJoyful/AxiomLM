@@ -899,6 +899,30 @@ async def test_off_book_question_still_searches_the_web_with_no_book_name():
     assert web.calls[0] == ("search", question)
 
 
+async def test_dated_web_rule_only_for_questions_relative_to_today():
+    from src.agent import DATED_WEB_NOTE, relative_to_date
+
+    async def final_for(question):
+        client = Client(qa_script())
+        await collect(
+            request=AgentRequest("r", question, "sicp", "m", web_enabled=True),
+            client=client,
+            sandbox=Sandbox(),
+            counter=Counter(),
+            search=search_with([Candidate("c", "streams", 300)], []),
+            web=Web(),
+        )
+        return client.requests[-1]["messages"][-1]["content"]
+
+    final = await final_for("What was the weather in Kolkata yesterday?")
+    assert DATED_WEB_NOTE + "." in final
+    assert "ignore undated figures" in final
+    assert "agree after unit conversion are not a discrepancy" in final
+    assert DATED_WEB_NOTE not in await final_for("Latest Racket release?")
+    assert relative_to_date("What happened last week?")
+    assert not relative_to_date("What is a weekday procedure?")
+
+
 def test_rewritten_followup_without_the_book_name_gets_it_added():
     from src.agent import web_query
 

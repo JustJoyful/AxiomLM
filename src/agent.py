@@ -172,6 +172,25 @@ SOLVE_RULES = (
     "result was computed directly. If a rule appears only in an exercise, say so."
 )
 
+# Run 07 case 5 presented undated figures as yesterday's and called 90 °F vs
+# 33 °C a discrepancy.
+DATED_WEB_NOTE = (
+    ". The question is relative to today's date: use only figures the web evidence "
+    "ties to the matching date and name their source; ignore undated figures, and "
+    "if none match that date, say so. Values that agree after unit conversion are "
+    "not a discrepancy"
+)
+_RELATIVE_DATE = re.compile(
+    r"\b(?:yesterday|today|tonight|tomorrow|(?:last|this|next) "
+    r"(?:week|month|year|night))\b",
+    re.IGNORECASE,
+)
+
+
+def relative_to_date(question: str) -> bool:
+    return bool(_RELATIVE_DATE.search(question))
+
+
 # The orchestrator's deterministic coverage verdict, so a small model does not
 # open with what the evidence lacks (run 06 cases 2, 3, 7).
 COVERED_NOTE = "The book evidence above addresses this question. "
@@ -994,6 +1013,8 @@ async def run_agent(
                     "web; if web sources disagree, say so instead of picking one "
                     "silently"
                 )
+                if relative_to_date(resolved_question(request)):
+                    web_note += DATED_WEB_NOTE
             else:
                 web_note = f"; web search was {searched.status}"
             yield AgentEvent("sources", {"sources": list(run.sources)})
