@@ -128,6 +128,11 @@ async def test_agent_final_prompts_use_neutral_wording_and_no_qa_trace():
     assert "Computation output:\n3*x**2 + 2" in final
     assert "If a rule appears only in an exercise, say so." in final
     assert "say the book describes related methods (by page)" in final
+    # Run 07 case 9 said "verified as identical to the book's ... approach".
+    assert (
+        "Verified means an independent symbolic check agreed with the computed "
+        "result; it does not mean the book shows this derivation." in final
+    )
     assert len(agent.SOLVE_RULES) + len(agent.FINAL) <= 1000
 
 
