@@ -118,6 +118,9 @@ def summarize(policy: list[dict]) -> dict:
 _INTERNAL_TERMS = re.compile(r"\b(sandbox|trace|local search|tools?)\b", re.IGNORECASE)
 _PAGE_AS_SECTION = re.compile(r"\bSection \d{3,}\b")
 _DISCLAIMER = re.compile(r"\bdoes not (?:cover|contain)\b", re.IGNORECASE)
+_PAGE_CITE = re.compile(
+    r"\b(?:pp?\.|pages?)\s*(\d+(?:\s*(?:[-–—,]|and)\s*\d+)*)", re.IGNORECASE
+)
 _REJECTION = re.compile(
     r"\b(?:incorrect|not (?:true|correct|accurate)|false|wrong|mistaken|"
     r"contradicts?|the book does not say)\b",
@@ -126,6 +129,19 @@ _REJECTION = re.compile(
 _NEGATED_CLAIM = re.compile(
     r"\b(?:never|not|cannot|can't|don't|doesn't)\s+(\w+)", re.IGNORECASE
 )
+
+
+def cited_pages(answer: str) -> list[int]:
+    """Every page an answer names as p. N, pp. N-M, page N or pages N and M."""
+    pages = []
+    for group in _PAGE_CITE.findall(answer):
+        for part in re.split(r"\s*(?:,|and)\s*", group):
+            ends = [int(n) for n in re.split(r"\s*[-–—]\s*", part) if n]
+            if len(ends) == 2 and ends[0] <= ends[1]:
+                pages += range(ends[0], ends[1] + 1)
+            else:
+                pages += ends
+    return pages
 
 
 def premise_lints(answer: str, question: str) -> list[str]:
@@ -157,6 +173,9 @@ def answer_lints(row: dict, case: dict | None = None) -> list[str]:
     lints += [f"page as section: {m}" for m in _PAGE_AS_SECTION.findall(answer)]
     labelled = set(case.get("relevant_pages") or [])
     retrieved = set(row.get("physical_pages") or [])
+    unretrieved = sorted(set(cited_pages(answer)) - retrieved)
+    if unretrieved:
+        lints.append(f"cited pages not retrieved: {unretrieved}")
     sufficient = (row.get("assessment") or {}).get("sufficient") is True
     if _DISCLAIMER.search(answer) and (sufficient or labelled & retrieved):
         lints.append("disclaimer although the book evidence covers the question")

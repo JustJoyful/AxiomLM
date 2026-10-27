@@ -283,6 +283,24 @@ def test_lint_reports_missed_labelled_pages():
     ]
 
 
+def test_lint_cited_pages_must_be_retrieved_pages():
+    # Run 07 case 8: "p. 33" came from the table of contents text on p. 4.
+    row = {"physical_pages": [4, 136, 139, 140, 141]}
+    answer = "In Chapter 1 (p. 33), a procedure is a black box; Chapter 2 (p. 140)."
+    assert lint(answer, **row) == ["cited pages not retrieved: [33]"]
+    assert after.cited_pages("See pp. 139-141, page 4 and pages 136 and 140.") == [
+        139,
+        140,
+        141,
+        4,
+        136,
+        140,
+    ]
+    assert lint("See pp. 139–141 and p. 4.", **row) == []
+    assert lint("See pp. 139–142.", **row) == ["cited pages not retrieved: [142]"]
+    assert lint("It has 33 pages of exercises.", **row) == []
+
+
 def test_lint_contradiction_answers_must_reject_the_premise():
     question = (
         "Since the book says interpreters never evaluate expressions, why does it "
