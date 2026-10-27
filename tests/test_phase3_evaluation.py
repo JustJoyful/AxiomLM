@@ -301,6 +301,20 @@ def test_lint_cited_pages_must_be_retrieved_pages():
     assert lint("It has 33 pages of exercises.", **row) == []
 
 
+def test_lint_verification_claimed_to_match_the_book():
+    # Run 07 case 9, offline and online.
+    for answer in (
+        (
+            "The verification status is verified, matching the book's theoretical "
+            "derivation for this polynomial."
+        ),
+        "It was verified as identical to the book's symbolic differentiation approach.",
+    ):
+        assert lint(answer) == ["verification claimed to match the book"]
+    assert lint("It is verified. The book describes deriv.") == []
+    assert lint("This matches the book's definition of a derivative.") == []
+
+
 def test_lint_contradiction_answers_must_reject_the_premise():
     question = (
         "Since the book says interpreters never evaluate expressions, why does it "

@@ -121,6 +121,9 @@ _DISCLAIMER = re.compile(r"\bdoes not (?:cover|contain)\b", re.IGNORECASE)
 _PAGE_CITE = re.compile(
     r"\b(?:pp?\.|pages?)\s*(\d+(?:\s*(?:[-–—,]|and)\s*\d+)*)", re.IGNORECASE
 )
+_BOOK_MATCH = re.compile(
+    r"\b(?:match(?:es|ing)?|identical to) the book's", re.IGNORECASE
+)
 _REJECTION = re.compile(
     r"\b(?:incorrect|not (?:true|correct|accurate)|false|wrong|mistaken|"
     r"contradicts?|the book does not say)\b",
@@ -190,6 +193,10 @@ def answer_lints(row: dict, case: dict | None = None) -> list[str]:
         lints.append("web sources fetched but not used in the answer")
     if labelled - retrieved:
         lints.append(f"labelled pages not retrieved: {sorted(labelled - retrieved)}")
+    for sentence in re.split(r"(?<=[.!?])\s+", answer):
+        if _BOOK_MATCH.search(sentence) and "verif" in sentence.lower():
+            lints.append("verification claimed to match the book")
+            break
     if case.get("kind") == "contradiction":
         lints += premise_lints(answer, row.get("question") or case.get("question", ""))
     return lints
