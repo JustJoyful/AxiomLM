@@ -918,7 +918,12 @@ async def test_dated_web_rule_only_for_questions_relative_to_today():
     assert DATED_WEB_NOTE + "." in final
     assert "ignore undated figures" in final
     assert "agree after unit conversion are not a discrepancy" in final
-    assert DATED_WEB_NOTE not in await final_for("Latest Racket release?")
+    racket = await final_for("Latest Racket release?")
+    assert DATED_WEB_NOTE not in racket
+    # Run 07 case 13 would not call an announced release the stable one.
+    assert "A release announcement on the project's official site is its current" in (
+        racket
+    )
     assert relative_to_date("What happened last week?")
     assert not relative_to_date("What is a weekday procedure?")
 

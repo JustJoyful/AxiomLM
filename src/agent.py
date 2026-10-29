@@ -1012,7 +1012,8 @@ async def run_agent(
                 web_note = (
                     ", then answer from the web evidence, saying it comes from the "
                     "web; if web sources disagree, say so instead of picking one "
-                    "silently"
+                    "silently. A release announcement on the project's official "
+                    "site is its current release; state the newest one and its date"
                 )
                 if relative_to_date(resolved_question(request)):
                     web_note += DATED_WEB_NOTE
