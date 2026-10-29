@@ -484,6 +484,27 @@ def plain_candidate(value: str | None) -> str | None:
     return candidates[0] if candidates else None
 
 
+_DOT_LEADER = re.compile(r"(?:\.\s){3,}")
+_PRINTED_PAGE_CELL = re.compile(r"\|\s*\d{1,4}\s*\|\s*$")
+
+
+def without_printed_pages(text: str) -> str:
+    """Drop the printed page column from table-of-contents rows.
+
+    Printed page numbers are not physical PDF pages; run 07 and 08 case 8 cited
+    "p. 33" from the contents on p. 4. A passage counts as contents when three
+    or more of its lines carry dot leaders; only table rows lose their last
+    numeric cell.
+    """
+    lines = text.split("\n")
+    if sum(bool(_DOT_LEADER.search(line)) for line in lines) < 3:
+        return text
+    return "\n".join(
+        _PRINTED_PAGE_CELL.sub("|", line) if line.lstrip().startswith("|") else line
+        for line in lines
+    )
+
+
 def evidence_text(sources: list[EvidenceRef]) -> str:
     """Number evidence blocks without IDs the model could echo as citations.
 
@@ -506,7 +527,8 @@ def evidence_text(sources: list[EvidenceRef]) -> str:
                 parts.append(f"{label} {collapse_page_ranges(pages)}")
         else:
             parts.append(f"web page: {ref.title or 'untitled'}")
-        blocks.append(f"[{' · '.join(parts)}]\n{ref.text}")
+        text = without_printed_pages(ref.text) if ref.kind == "book" else ref.text
+        blocks.append(f"[{' · '.join(parts)}]\n{text}")
     return "\n\n".join(blocks) or "No evidence was retrieved."
 
 

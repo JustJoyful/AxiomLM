@@ -305,6 +305,32 @@ def test_evidence_headers_hold_no_ids_or_placeholder_metadata():
     assert "[book excerpt · p. 523]" in evidence_text([single])
 
 
+def test_contents_rows_lose_their_printed_page_numbers():
+    from src.agent import evidence_text, without_printed_pages
+    from src.tools.protocol import EvidenceRef
+
+    contents = (
+        "|||1.1.8|Procedures as Black-Box Abstractions<br>. . . . .|x|33|\n"
+        "|---|---|---|---|---|---|\n"
+        "|||1.2.1|Linear Recursion and Iteration|. . . . . . . . .|41|\n"
+        "|||1.2.2|Tree Recursion . . . . . . . . .|. . . . . . . . .|47|\n"
+        "|2|Building Abstractions with Data||||107|"
+    )
+    stripped = without_printed_pages(contents)
+    for printed in ("|33|", "|41|", "|47|", "|107|"):
+        assert printed not in stripped
+    assert "1.1.8|Procedures as Black-Box Abstractions" in stripped
+    assert "|2|Building Abstractions with Data||||" in stripped
+    ref = EvidenceRef("c", "book", contents, physical_pages=(4,))
+    assert "|33|" not in evidence_text([ref])
+    # Ordinary passages and tables keep their numbers.
+    table = "|n|fib(n)|\n|---|---|\n|10|55|"
+    assert without_printed_pages(table) == table
+    assert without_printed_pages("See . . . and 33 more . . . . . . 12") == (
+        "See . . . and 33 more . . . . . . 12"
+    )
+
+
 class LengthCounter:
     """Counts one token per four characters of message content."""
 
