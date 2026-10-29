@@ -12,6 +12,8 @@ RAW_PDFS = DATA / "raw_pdfs"
 CLEAN_IMGS = DATA / "clean_images"
 PARSED_MD = DATA / "parsed_md"
 CHECKPOINTS = PARSED_MD / "checkpoints"
+# Downstream text repairs of the frozen checkpoints (src/text_repair.py).
+REPAIRED_MD = PARSED_MD / "repaired"
 VECTOR_STORE = DATA / "vector_store"
 LOGS_DIR = DATA / "logs"
 
