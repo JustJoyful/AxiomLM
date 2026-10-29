@@ -148,10 +148,13 @@ FINAL = (
 )
 # First in every Q&A final prompt, ahead of the coverage note: run 07 case 12
 # accepted the premise when it came fourth, after "starting with the answer".
+# Conditional on an asserted claim: unqualified, it made run 08 case 8 (a plain
+# comparison) open with "The premise that ... is incorrect".
 PREMISE_RULE = (
-    "If the question states something the evidence contradicts, begin by saying the "
-    "premise is wrong and give what the book says; do not invent reasons for the "
-    "false premise. Never restate the false claim as true. "
+    "Only if the question asserts as fact something the evidence contradicts, begin "
+    "by saying that claim is wrong and give what the book says; do not invent "
+    "reasons for it, and never restate the false claim as true. Otherwise do not "
+    "mention a premise. "
 )
 QA_RULES = (
     "Answer directly from the book evidence, starting with the answer; do not open "

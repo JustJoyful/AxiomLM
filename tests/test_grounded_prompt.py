@@ -42,7 +42,7 @@ async def test_agent_qa_rules_answer_directly_and_reach_the_final_prompt():
         "even a title page",
         "'A with B' lists co-authors; 'foreword by C' credits only C",
         "resolve what it refers to from the conversation",
-        "do not invent reasons for the false premise",
+        "do not invent reasons for it",
         "only if no passage addresses it",
     ):
         assert phrase in final
@@ -78,10 +78,12 @@ async def test_false_premise_rule_comes_first_whatever_the_coverage_verdict():
         )
         final = client.requests[-1]["messages"][-1]["content"]
         assert agent.PREMISE_RULE in final
+        assert "asserts as fact something the evidence contradicts" in final
         assert (
-            "begin by saying the premise is wrong and give what the book says" in final
+            "begin by saying that claim is wrong and give what the book says" in final
         )
-        assert "Never restate the false claim as true." in final
+        assert "never restate the false claim as true" in final
+        assert "Otherwise do not mention a premise." in final
         # Ahead of the coverage note and the "start with the answer" rule.
         assert final.index(agent.PREMISE_RULE) < final.index("starting with the answer")
         if agent.COVERED_NOTE in final:
