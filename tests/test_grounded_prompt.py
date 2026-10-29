@@ -40,6 +40,7 @@ async def test_agent_qa_rules_answer_directly_and_reach_the_final_prompt():
     for phrase in (
         "starting with the answer",
         "even a title page",
+        "'A with B' lists co-authors; 'foreword by C' credits only C",
         "resolve what it refers to from the conversation",
         "do not invent reasons for the false premise",
         "only if no passage addresses it",

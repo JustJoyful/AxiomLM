@@ -156,7 +156,8 @@ PREMISE_RULE = (
 QA_RULES = (
     "Answer directly from the book evidence, starting with the answer; do not open "
     "with remarks about what the evidence lacks. If a page is requested, summarize "
-    'what it contains, even a title page. For a follow-up ("that", "another"), '
+    "what it contains, even a title page ('A with B' lists co-authors; 'foreword by "
+    'C\' credits only C). For a follow-up ("that", "another"), '
     "resolve what it refers to from the conversation and give an example from the "
     "evidence. Say the book does not cover the question only if no passage "
     "addresses it{web_note}."
