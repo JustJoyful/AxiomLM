@@ -115,7 +115,11 @@ def summarize(policy: list[dict]) -> dict:
     }
 
 
-_INTERNAL_TERMS = re.compile(r"\b(sandbox|trace|local search|tools?)\b", re.IGNORECASE)
+# "trace" alone is also an English verb ("trace the evaluation"); only its noun
+# uses that name the agent's internals are flagged.
+_INTERNAL_TERMS = re.compile(
+    r"\b(sandbox|the trace|trace provided|local search|tools?)\b", re.IGNORECASE
+)
 _PAGE_AS_SECTION = re.compile(r"\bSection \d{3,}\b")
 _DISCLAIMER = re.compile(r"\bdoes not (?:cover|contain)\b", re.IGNORECASE)
 _PAGE_CITE = re.compile(

@@ -240,14 +240,21 @@ def lint(answer, **row):
 
 
 def test_lint_internal_terms():
-    found = lint("The sandbox trace from the local search tool says 3.")
+    found = lint("The sandbox and the trace from the local search tool say 3.")
     assert found == [
         "internal term: local search",
         "internal term: sandbox",
+        "internal term: the trace",
         "internal term: tool",
-        "internal term: trace",
     ]
+    assert lint("Per the trace provided, it uses tools.") == [
+        "internal term: the trace",
+        "internal term: tools",
+    ]
+    assert lint("Based on trace provided output.") == ["internal term: trace provided"]
     assert lint("An interpreter is a program.") == []
+    # "trace" as a verb is ordinary English.
+    assert lint("We can trace the evaluation of (f 5) step by step.") == []
 
 
 def test_lint_page_number_used_as_section():
