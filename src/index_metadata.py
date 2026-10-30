@@ -91,7 +91,9 @@ def stable_chunk_id(
     ).hexdigest()
 
 
-def source_segments(book_stem: str) -> list[SourceSegment]:
+def source_segments(
+    book_stem: str, *, pages_dir: Path | None = None
+) -> list[SourceSegment]:
     validate_book(book_stem)
     manifest_path = config.PARSED_MD / book_stem / "page_manifest.json"
     page_map = {}
@@ -115,7 +117,8 @@ def source_segments(book_stem: str) -> list[SourceSegment]:
     chapter, section, subsection = "Unknown Chapter", "Unknown Section", None
     output = []
     fenced = False
-    for path in sorted((config.CHECKPOINTS / book_stem).glob("page_*.md")):
+    folder = config.CHECKPOINTS / book_stem if pages_dir is None else pages_dir
+    for path in sorted(folder.glob("page_*.md")):
         if not re.fullmatch(r"page_\d{4}\.md", path.name):
             raise ValueError("Invalid checkpoint filename")
         idx = int(path.stem.split("_")[1])
