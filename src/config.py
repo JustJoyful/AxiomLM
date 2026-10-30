@@ -271,6 +271,8 @@ CHAT_TOKENIZER_MODEL_DIGEST = ANSWER_TOKENIZER_MODEL_DIGEST
 CHAT_TOKENIZER_OLLAMA_VERSION = ANSWER_TOKENIZER_OLLAMA_VERSION
 PHASE3_RUNTIME_LOGS = LOGS_DIR / "phase3_runtime"
 PHASE3_AGENT_LOGS = LOGS_DIR / "phase3_agent"
+PHASE4_LABELS_DIR = ROOT / "tests/fixtures/phase4"
+PHASE4_LOGS = LOGS_DIR / "phase4_eval"
 
 # Web evidence: off by default; /web on grants retrieval permission, not cloud inference.
 WEB_ENABLED_DEFAULT = False
