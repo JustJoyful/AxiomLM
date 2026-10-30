@@ -1,19 +1,37 @@
-import json
-from pathlib import Path
-
 import pymupdf
 import pytest
 
 from src import text_repair
 from src.text_repair import RepairStats, code_lines, map_pua, repair_code, repair_page
 
-FIXTURE = Path(__file__).parent / "fixtures" / "text_repair"
+# An excerpt of sicp physical p. 39 as pymupdf4llm wrote it, and the monospaced
+# lines of that PDF page as code_lines() reads them.
+PAGE = (
+    "```\n(*5size)\n10\n```\n\n"
+    "```\n(definepi3.14159)\n```\n\n"
+    "```\n(defineradius10)\n```\n\n"
+    "```\n(*pi(*radiusradius))\n314.159\n"
+    "(definecircumference(*2piradius))\ncircumference\n62.8318\n```\n\n"
+    "\ue049e interpreter makes this step-by-step program construction "
+    "particularly convenient. \ue049is feature encourages the incremental "
+    "development and testing of programs. \ue049is memory is called the "
+    "_environment_."
+)
+PDF_LINES = [
+    "(* 5 size)",
+    "10",
+    "(define pi 3.14159)",
+    "(define radius 10)",
+    "(* pi (* radius radius))",
+    "314.159",
+    "(define circumference (* 2 pi radius))",
+    "circumference",
+    "62.8318",
+]
 
 
 def fixture_page():
-    markdown = (FIXTURE / "sicp_page_0038.md").read_text(encoding="utf-8")
-    lines = json.loads((FIXTURE / "sicp_page_0038_code_lines.json").read_text())
-    return markdown, lines["code_lines"]
+    return PAGE, PDF_LINES
 
 
 def test_fixture_page_gets_code_spacing_and_ligatures_back():
