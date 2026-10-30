@@ -38,7 +38,16 @@ class Client:
         self.requests = []
 
     async def achat(
-        self, messages, *, model, tools, think, num_predict, timeout, on_chunk=None
+        self,
+        messages,
+        *,
+        model,
+        tools,
+        think,
+        num_predict,
+        timeout,
+        on_chunk=None,
+        options=None,
     ):
         self.requests.append(
             {
@@ -46,19 +55,22 @@ class Client:
                 "tools": tools,
                 "think": think,
                 "num_predict": num_predict,
+                "options": options,
             }
         )
         reply = self.replies.pop(0)
         if callable(reply):
             reply = reply(messages)
+        reply = dict(reply)
+        done_reason = reply.pop("done_reason", "stop")
         message = {"role": "assistant", "content": "", "thinking": "", "tool_calls": []}
         message.update(reply)
         if on_chunk and message["content"]:
             on_chunk({"message": {"content": message["content"]}})
         return {
             "message": message,
-            "complete": True,
-            "done_reason": "stop",
+            "complete": done_reason == "stop",
+            "done_reason": done_reason,
             "prompt_eval_count": 10,
         }
 
@@ -279,11 +291,44 @@ def test_evidence_headers_hold_no_ids_or_placeholder_metadata():
     web = EvidenceRef("web:c:1", "web", "Racket 9.3", url="https://x.org", title="v9.3")
     text = evidence_text([legacy, paged, web])
     assert "[book excerpt · section: Variables, expressions and statements]" in text
-    assert "[book excerpt · pages 225-227]" in text
+    assert "[book excerpt · pp. 225-227]" in text
     assert "[web page: v9.3]" in text
     for leaked in ("chunk", "71", "Unknown", "p.?", "https://", "web:c", "Source"):
         assert leaked not in text
     assert "Cite" not in SYSTEM and "Do not write citations" in SYSTEM
+    assert "Name a section only if an evidence header shows it" in SYSTEM
+    assert "never call a page number a section" in SYSTEM
+    # Run 07 case 8 cited "p. 33" from the table of contents text on p. 4.
+    assert "Give only page numbers shown in an evidence header" in SYSTEM
+    assert "(tables of contents, cross-references) are printed-book pages" in SYSTEM
+    single = EvidenceRef("c", "book", "x", physical_pages=(523,))
+    assert "[book excerpt · p. 523]" in evidence_text([single])
+
+
+def test_contents_rows_lose_their_printed_page_numbers():
+    from src.agent import evidence_text, without_printed_pages
+    from src.tools.protocol import EvidenceRef
+
+    contents = (
+        "|||1.1.8|Procedures as Black-Box Abstractions<br>. . . . .|x|33|\n"
+        "|---|---|---|---|---|---|\n"
+        "|||1.2.1|Linear Recursion and Iteration|. . . . . . . . .|41|\n"
+        "|||1.2.2|Tree Recursion . . . . . . . . .|. . . . . . . . .|47|\n"
+        "|2|Building Abstractions with Data||||107|"
+    )
+    stripped = without_printed_pages(contents)
+    for printed in ("|33|", "|41|", "|47|", "|107|"):
+        assert printed not in stripped
+    assert "1.1.8|Procedures as Black-Box Abstractions" in stripped
+    assert "|2|Building Abstractions with Data||||" in stripped
+    ref = EvidenceRef("c", "book", contents, physical_pages=(4,))
+    assert "|33|" not in evidence_text([ref])
+    # Ordinary passages and tables keep their numbers.
+    table = "|n|fib(n)|\n|---|---|\n|10|55|"
+    assert without_printed_pages(table) == table
+    assert without_printed_pages("See . . . and 33 more . . . . . . 12") == (
+        "See . . . and 33 more . . . . . . 12"
+    )
 
 
 class LengthCounter:
@@ -609,6 +654,8 @@ async def test_compute_without_tool_call_retries_exactly_once():
     assert stages.count("compute_retry") == 1 and sandbox.executed
     assert last.data["verification"]["status"] == "verified"
     assert last.data["model_requests"] == 5
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 3*x**2 + 2." in final
 
 
 async def test_second_prose_compute_is_unverified_not_retried_again():
@@ -766,3 +813,475 @@ async def test_non_plain_value_uses_model_candidate_extraction():
         if "model_request" in r
     )
     assert sandbox.verified[0].candidate == "3*x**2 + 2"
+
+
+async def test_json_control_calls_are_greedy_and_final_keeps_configured_sampling():
+    from src import llm
+
+    client = Client(
+        [
+            {"content": '{"mode": "qa"}'},
+            {"content": '{"sufficient": true, "reason": "defined", "check": null}'},
+            {"content": "An interpreter runs programs."},
+        ]
+    )
+    await collect(
+        request=AgentRequest("r", "What is an interpreter?", "sicp", "m"),
+        client=client,
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c1", "An interpreter...", 796)], []),
+    )
+    route, assess, final = client.requests
+    assert route["options"] == assess["options"] == config.AGENT_JSON_OPTIONS
+    assert config.AGENT_JSON_OPTIONS["temperature"] == 0
+    assert "seed" in config.AGENT_JSON_OPTIONS
+    assert final["options"] is None
+    # With no override the payload carries the configured temperature.
+    assert llm.OllamaClient._options()["temperature"] == config.OLLAMA_TEMPERATURE
+
+
+def qa_script(sufficient=False):
+    return [
+        {"content": '{"mode": "qa"}'},
+        {"content": json.dumps({"sufficient": sufficient, "reason": "r"})},
+        {"content": "answer"},
+    ]
+
+
+async def test_requested_page_in_hand_skips_the_web_despite_the_flag():
+    web = Web()
+    _, last = await collect(
+        request=AgentRequest(
+            "r", "Summarize physical PDF page 1.", "sicp", "m", web_enabled=True
+        ),
+        client=Client(qa_script()),
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "Structure and Interpretation", 1)], []),
+        web=web,
+    )
+    assert web.calls == [] and "optional_web" not in last.data["stages"]
+    assert {"stage": "web_decision", "local_coverage": "requested pages retrieved"} in (
+        last.data["trace"]
+    )
+
+
+async def test_question_about_the_book_with_passages_skips_the_web():
+    web = Web()
+    await collect(
+        request=AgentRequest(
+            "r",
+            "Since the book says interpreters never evaluate expressions, why?",
+            "sicp",
+            "m",
+            web_enabled=True,
+        ),
+        client=Client(qa_script()),
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "An evaluator ...", 523)], []),
+        web=web,
+    )
+    assert web.calls == []
+
+
+async def test_web_query_is_the_rewritten_followup_not_the_raw_question():
+    web = Web()
+    # A rewrite naming the book ("... in SICP?") is book-scoped and skips the web
+    # (see test_followup_control_prompts_see_the_resolved_question).
+    query = "What are other examples of an interpreter?"
+    await collect(
+        request=AgentRequest(
+            "r",
+            "Give another example of that.",
+            "sicp",
+            "m",
+            web_enabled=True,
+            retrieval_query=query,
+        ),
+        client=Client(qa_script()),
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "unrelated", 630)], []),
+        web=web,
+    )
+    assert web.calls[0] == ("search", query + " sicp")
+
+
+async def test_off_book_question_still_searches_the_web_with_no_book_name():
+    web = Web()
+    question = "What was the weather in Kolkata yesterday?"
+    await collect(
+        request=AgentRequest(
+            "r", question, "sicp", "m", web_enabled=True, retrieval_query=question
+        ),
+        client=Client(qa_script()),
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "streams", 300)], []),
+        web=web,
+    )
+    assert web.calls[0] == ("search", question)
+
+
+async def test_dated_web_rule_only_for_questions_relative_to_today():
+    from src.agent import DATED_WEB_NOTE, relative_to_date
+
+    async def final_for(question):
+        client = Client(qa_script())
+        await collect(
+            request=AgentRequest("r", question, "sicp", "m", web_enabled=True),
+            client=client,
+            sandbox=Sandbox(),
+            counter=Counter(),
+            search=search_with([Candidate("c", "streams", 300)], []),
+            web=Web(),
+        )
+        return client.requests[-1]["messages"][-1]["content"]
+
+    final = await final_for("What was the weather in Kolkata yesterday?")
+    assert DATED_WEB_NOTE + "." in final
+    assert "ignore undated figures" in final
+    assert "agree after unit conversion are not a discrepancy" in final
+    racket = await final_for("Latest Racket release?")
+    assert DATED_WEB_NOTE not in racket
+    # Run 07 case 13 would not call an announced release the stable one.
+    assert "A release announcement on the project's official site is its current" in (
+        racket
+    )
+    assert relative_to_date("What happened last week?")
+    assert not relative_to_date("What is a weekday procedure?")
+
+
+def test_rewritten_followup_without_the_book_name_gets_it_added():
+    from src.agent import web_query
+
+    request = AgentRequest(
+        "r", "And that?", "sicp", "m", retrieval_query="What is an evaluator?"
+    )
+    assert web_query(request) == "What is an evaluator? sicp"
+    assert web_query(AgentRequest("r", "Racket release?", "sicp", "m")) == (
+        "Racket release?"
+    )
+
+
+async def test_system_message_carries_the_injected_date():
+    client = Client(qa_script(sufficient=True))
+    await collect(
+        request=AgentRequest(
+            "r", "What is an interpreter?", "sicp", "m", today="2026-10-26"
+        ),
+        client=client,
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "An interpreter", 796)], []),
+    )
+    assert all(
+        "Today's date is 2026-10-26." in r["messages"][0]["content"]
+        for r in client.requests
+    )
+
+
+SQRT = "Using Newton's method, what is the square root of 2 to six decimal places?"
+
+
+class FailsUntil(Sandbox):
+    """Fails the first ``failures`` executions with a traceback on stderr."""
+
+    def __init__(self, failures, value="1.414214"):
+        super().__init__(value=value)
+        self.failures = failures
+
+    async def execute(self, code):
+        self.executed.append(code)
+        if len(self.executed) <= self.failures:
+            return PythonResult("r", "error", stderr="TypeError: bad operand")
+        return PythonResult("r", "ok", value=self.value)
+
+
+def sqrt_script(*computes):
+    return [
+        {"content": '{"mode": "solve"}'},
+        {"content": '{"sufficient": true, "reason": "p.57", "check": null}'},
+        *computes,
+        {"content": "1.414214"},
+    ]
+
+
+async def test_length_stop_does_not_spend_the_repair_round():
+    sandbox = FailsUntil(1)
+    code = call("execute_python", code="result = sympy.N(sympy.sqrt(2), 7)")
+    client = Client(sqrt_script({"content": "", "done_reason": "length"}, code, code))
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=sandbox,
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    stages = [r["stage"] for r in last.data["trace"] if "model_request" in r]
+    assert stages == [
+        "classify",
+        "local_assessment",
+        "compute",
+        "compute_retry",
+        "compute_repair",
+        "final",
+    ]
+    assert len(sandbox.executed) == 2
+    failed = [r for r in last.data["trace"] if r.get("status") == "error"]
+    assert failed[0]["error"] == "TypeError: bad operand"
+    assert failed[0]["code"] == "result = sympy.N(sympy.sqrt(2), 7)"
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 1.414214." in final
+
+
+CUBE = "Using Newton's method, what is the cube root of 2 to six decimal places?"
+
+
+async def test_no_computed_value_never_invites_an_estimate():
+    code = call("execute_python", code="result = broken()")
+    client = Client(sqrt_script(code, code))
+    _, last = await collect(
+        request=AgentRequest("r", CUBE, "sicp", "m"),
+        client=client,
+        sandbox=FailsUntil(2),
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "No computed result is available." in final and "Do not estimate" in final
+    assert "no result" not in final and "Computation output" not in final
+    # An ordinary failed repair is still one round, never a second.
+    assert last.data["model_requests"] == 5
+
+
+@pytest.mark.parametrize(
+    ("question", "value", "shown"),
+    [
+        (SQRT, "1.414213562373095", "1.414214 (rounded from 1.414213562373095)"),
+        (
+            "Give sqrt(3) to 3 decimal places.",
+            "1.7320508",
+            "1.732 (rounded from 1.7320508)",
+        ),
+        (SQRT, "1.414214", "1.414214"),
+        (SQRT, "3*x**2 + 2", "3*x**2 + 2"),
+        ("What is sqrt(2)?", "1.414213562373095", "1.414213562373095"),
+        (SQRT, "1.41421", "1.41421 (only 5 decimal places were computed)"),
+        (
+            SQRT,
+            "Square root of 2: 1.414213562373095\nTo six decimal places: 1.41421",
+            "1.414214 (rounded from 1.414213562373095)",
+        ),
+    ],
+)
+def test_requested_decimal_places_are_rounded_by_the_host(question, value, shown):
+    from src.agent import rounded_for
+
+    assert rounded_for(question, value) == shown
+
+
+async def test_final_gets_the_rounded_value_and_its_source():
+    code = call("execute_python", code="result = sympy.N(sympy.sqrt(2), 15)")
+    client = Client(sqrt_script(code))
+    await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=Sandbox(value="1.41421356237310"),
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 1.414214 (rounded from 1.41421356237310)." in final
+
+
+async def test_followup_control_prompts_see_the_resolved_question():
+    web = Web()
+    resolved = "What is another example of an interpreter in SICP?"
+    client = Client(qa_script())
+    await collect(
+        request=AgentRequest(
+            "r",
+            "Give another example of that.",
+            "sicp",
+            "m",
+            web_enabled=True,
+            retrieval_query=resolved,
+        ),
+        client=client,
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "486", 35)], []),
+        web=web,
+    )
+    route, assess, final = (r["messages"][-1]["content"] for r in client.requests)
+    assert resolved in route and resolved in assess
+    assert "Give another example of that. (meaning: " + resolved + ")" in final
+    # The resolved question names the book, so the web is not consulted.
+    assert web.calls == []
+
+
+def test_overview_retrieval_string_is_not_a_resolved_question():
+    from src.agent import resolved_question
+
+    request = AgentRequest(
+        "r",
+        "What is this book about?",
+        "sicp",
+        "m",
+        retrieval_query=config.BOOK_OVERVIEW_RETRIEVAL_QUERY,
+    )
+    assert resolved_question(request) == "What is this book about?"
+
+
+async def test_too_few_decimals_get_one_precision_recompute():
+    class Precise(Sandbox):
+        async def execute(self, code):
+            self.executed.append(code)
+            value = "1.41421" if len(self.executed) == 1 else "1.414213562373095"
+            return PythonResult("r", "ok", value=value)
+
+    code = call("execute_python", code="result = newton(2)")
+    client = Client(sqrt_script(code, code))
+    sandbox = Precise()
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=sandbox,
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    stages = [r["stage"] for r in last.data["trace"] if "model_request" in r]
+    assert stages.count("compute_precision") == 1 and len(sandbox.executed) == 2
+    assert "only 5 decimal places; the question asks for 6" in (
+        client.requests[3]["messages"][-1]["content"]
+    )
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 1.414214 (rounded from 1.414213562373095)." in final
+
+
+async def test_precision_recompute_that_does_not_help_keeps_the_first_value():
+    code = call("execute_python", code="result = newton(2)")
+    client = Client(sqrt_script(code, code))
+    await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=Sandbox(value="1.41421"),
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "1.41421 (only 5 decimal places were computed)" in final
+
+
+async def test_recognised_numeric_question_gets_a_host_fallback_when_code_fails():
+    sandbox = FailsUntil(2, value="1.41421356237310")
+    code = call("execute_python", code="def good_enough?(g): pass")
+    client = Client(sqrt_script(code, code))
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=sandbox,
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    assert sandbox.executed[-1] == (
+        "result = sympy.N(sympy.sqrt(sympy.Rational('2')), 15)"
+    )
+    assert any(r["stage"] == "compute_fallback" for r in last.data["trace"])
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 1.414214 (rounded from 1.41421356237310)." in final
+    # No extra model request: the fallback is host code.
+    assert last.data["model_requests"] == 5
+
+
+def test_fallback_code_only_for_recognised_forms():
+    from src.agent import fallback_code
+
+    assert fallback_code("What is the square root of 2.25?") == (
+        "result = sympy.N(sympy.sqrt(sympy.Rational('2.25')), 15)"
+    )
+    assert fallback_code("Differentiate x^2") is None
+
+
+async def test_rounded_value_replaces_raw_output_that_misrounds():
+    code = call("execute_python", code="print(...)")
+    client = Client(sqrt_script(code))
+    raw = "Square root of 2: 1.414213562373095\nTo six decimal places: 1.41421"
+    await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=Sandbox(value=raw),
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "Computation output:\n1.414214 (rounded from 1.414213562373095)" in final
+    assert "To six decimal places: 1.41421" not in final
+
+
+async def test_symbolic_value_for_a_decimal_question_is_recomputed_then_falls_back():
+    class Symbolic(Sandbox):
+        async def execute(self, code):
+            self.executed.append(code)
+            value = "1.41421356237310" if "Rational" in code else "sqrt(2)"
+            return PythonResult("r", "ok", value=value)
+
+    code = call("execute_python", code="result = sympy.sqrt(2)")
+    client = Client(sqrt_script(code, code))
+    sandbox = Symbolic()
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m"),
+        client=client,
+        sandbox=sandbox,
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+    )
+    stages = [r["stage"] for r in last.data["trace"] if "stage" in r]
+    assert "compute_precision" in stages and "compute_fallback" in stages
+    final = client.requests[-1]["messages"][-1]["content"]
+    assert "A computation returned: 1.414214 (rounded from 1.41421356237310)." in final
+
+
+def two_calls(code):
+    function = {"name": "execute_python", "arguments": {"code": code}}
+    return {"tool_calls": [{"function": function}, {"function": function}]}
+
+
+@pytest.mark.parametrize(
+    ("web_enabled", "check"),
+    [
+        (True, None),
+        (False, {"kind": "substitution", "expression": "x**2 - 2", "variable": "x"}),
+    ],
+)
+async def test_later_compute_stages_keep_room_for_verify_and_web(web_enabled, check):
+    # Retries, the precision recompute and the fallback used to spend the calls
+    # the trusted check or the web step still needed, so the cap aborted the run.
+    assess = {"sufficient": True, "reason": "p.57", "check": check}
+    client = Client(
+        [
+            {"content": '{"mode": "solve"}'},
+            {"content": json.dumps(assess)},
+            two_calls("result = broken()"),
+            two_calls("result = newton(2)"),
+            {"content": "1.41421"},
+        ]
+    )
+    sandbox, web = FailsUntil(2, value="1.41421"), Web()
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m", web_enabled=web_enabled),
+        client=client,
+        sandbox=sandbox,
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+        web=web,
+    )
+    assert last.kind == "result", last.data.get("message")
+    assert last.data["tool_calls"] <= config.AGENT_MAX_TOOL_CALLS
+    if web_enabled:
+        assert [kind for kind, _ in web.calls] == ["search", "fetch"]
+    else:
+        assert len(sandbox.verified) == 1

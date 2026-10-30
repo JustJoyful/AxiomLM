@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -39,11 +40,13 @@ from scripts.evaluate_phase3_baseline import (
     tree_identity,
 )
 from src import config
+from src.llm import OllamaClient
 
 CODE = (
     "src/agent.py",
     "src/chat_tokens.py",
     "src/llm.py",
+    "src/query_rewriting.py",
     "src/retrieval.py",
     "src/tools/protocol.py",
     "src/tools/registry.py",
@@ -67,7 +70,11 @@ POLICY_NAMES = (
 
 
 def policy_checks(case: dict, row: dict, *, web: bool = False) -> dict:
-    """Label-derived policy outcomes for one case; absent keys are not applicable."""
+    """Label-derived policy outcomes for one case; absent keys are not applicable.
+
+    Online, a case without ``web_expected`` records ``None`` so the missing
+    label counts as applicable-but-failed instead of silently not applicable.
+    """
     stages = row.get("stages", [])
     used_web = "optional_web" in stages
     checks = {
@@ -86,6 +93,8 @@ def policy_checks(case: dict, row: dict, *, web: bool = False) -> dict:
         elif expected == "only_on_failure_when_enabled":
             verified = (row.get("verification") or {}).get("status") == "verified"
             checks["web_when_expected"] = used_web != verified
+        else:
+            checks["web_when_expected"] = None
     expected = case.get("expected_stage_order")
     if expected:
         checks["stage_order"] = [s for s in stages if s in expected] == list(expected)
@@ -100,9 +109,133 @@ def summarize(policy: list[dict]) -> dict:
         name: {
             "passed": sum(1 for p in policy if p.get(name) is True),
             "applicable": sum(1 for p in policy if name in p),
+            "missing_label": sum(1 for p in policy if name in p and p[name] is None),
         }
         for name in POLICY_NAMES
     }
+
+
+# "trace" alone is also an English verb ("trace the evaluation"); only its noun
+# uses that name the agent's internals are flagged.
+_INTERNAL_TERMS = re.compile(
+    r"\b(sandbox|the trace|trace provided|local search|tools?)\b", re.IGNORECASE
+)
+_PAGE_AS_SECTION = re.compile(r"\bSection \d{3,}\b")
+_DISCLAIMER = re.compile(r"\bdoes not (?:cover|contain)\b", re.IGNORECASE)
+_PAGE_CITE = re.compile(
+    r"\b(?:pp?\.|pages?)\s*(\d+(?:\s*(?:[-–—,]|and)\s*\d+)*)", re.IGNORECASE
+)
+_BOOK_MATCH = re.compile(
+    r"\b(?:match(?:es|ing)?|identical to) the book's", re.IGNORECASE
+)
+_REJECTION = re.compile(
+    r"\b(?:incorrect|not (?:true|correct|accurate)|false|wrong|mistaken|"
+    r"contradicts?|the book does not say)\b",
+    re.IGNORECASE,
+)
+# The premise's negated verb and its object ("never evaluate expressions"); a
+# negation of the verb alone ("does not evaluate operands") is a different claim.
+_NEGATED_CLAIM = re.compile(
+    r"\b(?:never|not|cannot|can't|don't|doesn't)\s+(\w+)\s+(\w+)", re.IGNORECASE
+)
+
+
+def cited_pages(answer: str) -> list[int]:
+    """Every page an answer names as p. N, pp. N-M, page N or pages N and M."""
+    pages = []
+    for group in _PAGE_CITE.findall(answer):
+        for part in re.split(r"\s*(?:,|and)\s*", group):
+            ends = [int(n) for n in re.split(r"\s*[-–—]\s*", part) if n]
+            if len(ends) == 2 and ends[0] <= ends[1]:
+                pages += range(ends[0], ends[1] + 1)
+            else:
+                pages += ends
+    return pages
+
+
+def premise_lints(answer: str, question: str) -> list[str]:
+    """A contradiction case must reject its premise, never restate it as true."""
+    lints = []
+    if not _REJECTION.search(answer):
+        lints.append("premise not rejected")
+    claims = {(v.lower(), o.lower()) for v, o in _NEGATED_CLAIM.findall(question)}
+    for verb, obj in sorted(claims):
+        restated = re.compile(
+            rf"\b(?:never|do not|does not|don't|doesn't|cannot)\s+"
+            rf"{re.escape(verb.rstrip('s'))}\w*\s+{re.escape(obj.rstrip('s'))}",
+            re.IGNORECASE,
+        )
+        for sentence in re.split(r"(?<=[.!?])\s+", answer):
+            if restated.search(sentence) and not _REJECTION.search(sentence):
+                lints.append(f"premise restated without negation: {verb} {obj}")
+                break
+    return lints
+
+
+def answer_lints(row: dict, case: dict | None = None) -> list[str]:
+    """Answer-text findings for the reviewer; they never change ``passed``."""
+    case = case or {}
+    answer = row.get("answer") or ""
+    lints = [
+        f"internal term: {term}"
+        for term in sorted({m.lower() for m in _INTERNAL_TERMS.findall(answer)})
+    ]
+    lints += [f"page as section: {m}" for m in _PAGE_AS_SECTION.findall(answer)]
+    labelled = set(case.get("relevant_pages") or [])
+    retrieved = set(row.get("physical_pages") or [])
+    unretrieved = sorted(set(cited_pages(answer)) - retrieved)
+    if unretrieved:
+        lints.append(f"cited pages not retrieved: {unretrieved}")
+    sufficient = (row.get("assessment") or {}).get("sufficient") is True
+    if _DISCLAIMER.search(answer) and (sufficient or labelled & retrieved):
+        lints.append("disclaimer although the book evidence covers the question")
+    if (
+        row.get("web_sources")
+        and case.get("web_expected") is False
+        and not re.search(r"\bweb\b", answer, re.IGNORECASE)
+    ):
+        lints.append("web sources fetched but not used in the answer")
+    if labelled - retrieved:
+        lints.append(f"labelled pages not retrieved: {sorted(labelled - retrieved)}")
+    for sentence in re.split(r"(?<=[.!?])\s+", answer):
+        if _BOOK_MATCH.search(sentence) and "verif" in sentence.lower():
+            lints.append("verification claimed to match the book")
+            break
+    if case.get("kind") == "contradiction":
+        lints += premise_lints(answer, row.get("question") or case.get("question", ""))
+    return lints
+
+
+def sampling_record() -> dict:
+    keys = ("temperature", "top_p", "seed")
+    final = OllamaClient._options()
+    json_calls = {**final, **config.AGENT_JSON_OPTIONS}
+    return {
+        "final": {k: final[k] for k in keys if k in final},
+        "json_calls": {k: json_calls[k] for k in keys if k in json_calls},
+    }
+
+
+def select_cases(cases: list[dict], case_ids: list[str]) -> list[dict]:
+    """A labelled subset for stability reruns; unknown ids are an error."""
+    unknown = set(case_ids) - {c["case_id"] for c in cases}
+    if unknown:
+        raise ValueError(f"Unknown case ids: {sorted(unknown)}")
+    return [c for c in cases if c["case_id"] in case_ids]
+
+
+def apply_web_expectations(labels: dict, cases: list[dict]) -> None:
+    """Phase 2 cases carry their web expectation on the frozen reference.
+
+    Cases named there get web only when enabled; the other book-answerable
+    Phase 2 cases are expected not to use the web. Labels are not edited.
+    """
+    named = labels["phase2_reference"].get("web_expected", {})
+    for case in cases:
+        if case["case_id"] in named:
+            case.setdefault("web_expected", "only_when_enabled")
+        elif case.get("source") == "phase2" and case.get("answerable") is True:
+            case.setdefault("web_expected", False)
 
 
 async def _run_case(case, book, client, sandbox, counter, web) -> dict:
@@ -111,6 +244,7 @@ async def _run_case(case, book, client, sandbox, counter, web) -> dict:
     from src.tools.web import WebTools
 
     history = list(case["history"])
+    today = datetime.now().astimezone().date().isoformat()
     started = time.monotonic()
     rewritten = await rewrite_followup(
         case["question"],
@@ -127,11 +261,18 @@ async def _run_case(case, book, client, sandbox, counter, web) -> dict:
         history=tuple(history),
         web_enabled=web,
         retrieval_query=rewritten.retrieval_query,
+        today=today,
     )
     row = {
         "case_id": case["case_id"],
         "kind": case["kind"],
         "question": case["question"],
+        "today": today,
+        "rewrite": {
+            "applied": rewritten.applied,
+            "retrieval_query": rewritten.retrieval_query,
+            "fallback_reason": rewritten.fallback_reason,
+        },
         "physical_pages": [],
     }
     stage_times = []
@@ -200,6 +341,7 @@ async def _run_case(case, book, client, sandbox, counter, web) -> dict:
         row["stage_seconds"] = stage_times
         await asyncio.to_thread(client.unload_and_wait)
     row["policy"] = policy_checks(case, row, web=web)
+    row["lints"] = answer_lints(row, case)
     return row
 
 
@@ -220,7 +362,7 @@ def _leftover_scopes() -> list[str]:
     return [line.split()[0] for line in out.splitlines() if line.strip()]
 
 
-async def _evaluate(report, cases, book, store, web):
+async def _evaluate(report, cases, book, store, web, repeat=1):
     from src import index_store
     from src.chat_tokens import load_chat_counter
     from src.llm import OllamaClient
@@ -237,14 +379,25 @@ async def _evaluate(report, cases, book, store, web):
             index_store, "resolve_index", lambda stem: resolve(stem, root=store)
         ):
             for case in cases:
-                row = await _run_case(case, book, client, sandbox, counter, web)
-                report["rows"].append(row)
-                print(f"{case['case_id']}: {row.get('stages')}", flush=True)
+                for attempt in range(repeat):
+                    row = await _run_case(case, book, client, sandbox, counter, web)
+                    if repeat > 1:
+                        row["attempt"] = attempt + 1
+                    report["rows"].append(row)
+                    print(f"{case['case_id']}: {row.get('stages')}", flush=True)
     finally:
         await sandbox.aclose()
 
 
-def evaluate(book: str, *, baseline: Path, output: Path, web: bool = False) -> dict:
+def evaluate(
+    book: str,
+    *,
+    baseline: Path,
+    output: Path,
+    web: bool = False,
+    case_ids: list[str] | None = None,
+    repeat: int = 1,
+) -> dict:
     before = json.loads(baseline.read_text())
     if before.get("status") != "complete" or before.get("labels_sha256") != digest(
         LABELS
@@ -270,6 +423,8 @@ def evaluate(book: str, *, baseline: Path, output: Path, web: bool = False) -> d
                 "online_path": "not evaluated: run again with --web",
             }
         ),
+        # What the chat payloads send; Modelfile defaults apply only to unset keys.
+        "sampling": sampling_record(),
         "answer_review": {
             "status": "unreviewed",
             "reviewer": None,
@@ -283,15 +438,15 @@ def evaluate(book: str, *, baseline: Path, output: Path, web: bool = False) -> d
         labels, cases = load_cases()
         if labels["book_stem"] != book:
             raise ValueError("Labels are frozen for a different book")
-        # Phase 2 cases carry their web expectation on the frozen reference.
-        for case in cases:
-            if case["case_id"] in labels["phase2_reference"].get("web_expected", {}):
-                case.setdefault("web_expected", "only_when_enabled")
+        apply_web_expectations(labels, cases)
+        if case_ids:
+            cases = select_cases(cases, case_ids)
+            report["case_subset"] = {"case_ids": case_ids, "repeat": repeat}
         report.update(identities(CODE))
         with tempfile.TemporaryDirectory(prefix="axiom-phase3-agent-") as temp:
             store = Path(temp) / "vector_store"
             shutil.copytree(config.VECTOR_STORE, store)
-            asyncio.run(_evaluate(report, cases, book, store, web))
+            asyncio.run(_evaluate(report, cases, book, store, web, repeat))
         rows = report["rows"]
         report["retrieval_metrics"] = {
             "after": page_metrics(cases, rows),
@@ -305,6 +460,11 @@ def evaluate(book: str, *, baseline: Path, output: Path, web: bool = False) -> d
             "before": before.get("completion"),
         }
         report["policy_summary"] = summarize([r["policy"] for r in rows])
+        # Not a gate: lints are reviewer prompts and never change "passed".
+        report["lint_summary"] = {
+            "rows_with_lints": sum(1 for r in rows if r.get("lints")),
+            "rows": len(rows),
+        }
         report["status"] = "complete"
     except BaseException as exc:
         report.update(status="failed", error=f"{type(exc).__name__}: {exc}")
@@ -347,9 +507,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--web", action="store_true", help="grant web permission (online path)"
     )
+    parser.add_argument(
+        "--cases", nargs="+", help="only these case ids (a stability rerun)"
+    )
+    parser.add_argument("--repeat", type=int, default=1, help="runs per case")
     args = parser.parse_args()
     result = evaluate(
-        args.book, baseline=args.baseline, output=args.output, web=args.web
+        args.book,
+        baseline=args.baseline,
+        output=args.output,
+        web=args.web,
+        case_ids=args.cases,
+        repeat=args.repeat,
     )
     keys = (
         "status",

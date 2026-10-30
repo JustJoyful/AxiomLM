@@ -97,6 +97,7 @@ async def rewrite_followup(
             think=False,
             num_predict=config.QUERY_REWRITE_MAX_OUTPUT_TOKENS,
             timeout=config.QUERY_REWRITE_TIMEOUT_SECONDS,
+            options=config.AGENT_JSON_OPTIONS,
         )
         text = data.get("response")
         if (

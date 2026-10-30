@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock, Thread
@@ -1245,6 +1245,7 @@ class AxiomLMApp(App):
             top_k=k,
             distance=distance,
             retrieval_query=rewritten.retrieval_query,
+            today=date.today().isoformat(),
         )
         return run_agent(
             request,

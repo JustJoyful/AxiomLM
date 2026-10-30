@@ -12,6 +12,8 @@ RAW_PDFS = DATA / "raw_pdfs"
 CLEAN_IMGS = DATA / "clean_images"
 PARSED_MD = DATA / "parsed_md"
 CHECKPOINTS = PARSED_MD / "checkpoints"
+# Downstream text repairs of the frozen checkpoints (src/text_repair.py).
+REPAIRED_MD = PARSED_MD / "repaired"
 VECTOR_STORE = DATA / "vector_store"
 LOGS_DIR = DATA / "logs"
 
@@ -254,9 +256,16 @@ AGENT_ROUTING_ENABLED = True
 AGENT_MAX_MODEL_REQUESTS = 6
 AGENT_MAX_TOOL_CALLS = 6
 AGENT_MAX_CALLS_PER_MESSAGE = 2
+# The optional web step: one search and one fetch, kept back from the tool cap.
+AGENT_WEB_TOOL_CALLS = 2
 AGENT_REQUEST_SECONDS = 120.0
 AGENT_ROUTER_OUTPUT_TOKENS = 256
 AGENT_FINAL_OUTPUT_TOKENS = 768
+# JSON control calls (route, assessment, candidate, follow-up rewrite) are greedy
+# and seeded so identical evidence gets the same judgment; final answers keep
+# OLLAMA_TEMPERATURE.
+AGENT_JSON_SEED = 1729
+AGENT_JSON_OPTIONS = {"temperature": 0, "seed": AGENT_JSON_SEED}
 # Native chat accounting is valid only for this digest/runtime pair after the probe.
 CHAT_TOKENIZER_MODEL_DIGEST = ANSWER_TOKENIZER_MODEL_DIGEST
 CHAT_TOKENIZER_OLLAMA_VERSION = ANSWER_TOKENIZER_OLLAMA_VERSION
