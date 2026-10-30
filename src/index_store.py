@@ -243,7 +243,11 @@ def resolve_index(book_stem: str, *, root: Path = config.VECTOR_STORE) -> IndexH
 
 
 def build_index_version(
-    book_stem: str, chunks: Sequence[EmbeddedChunk], *, root: Path = config.VECTOR_STORE
+    book_stem: str,
+    chunks: Sequence[EmbeddedChunk],
+    *,
+    root: Path = config.VECTOR_STORE,
+    provenance: dict | None = None,
 ) -> IndexHandle:
     validate_book(book_stem)
     chunks = list(chunks)
@@ -298,6 +302,7 @@ def build_index_version(
             "query_policy": config.PHASE2_QUERY_POLICY,
             "embedding_signature": signature,
             "config": embedding_config(),
+            **(provenance or {}),
         }
         activate(root, books)
     return resolve_index(book_stem, root=root)
