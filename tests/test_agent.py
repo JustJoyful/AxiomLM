@@ -1243,3 +1243,45 @@ async def test_symbolic_value_for_a_decimal_question_is_recomputed_then_falls_ba
     assert "compute_precision" in stages and "compute_fallback" in stages
     final = client.requests[-1]["messages"][-1]["content"]
     assert "A computation returned: 1.414214 (rounded from 1.41421356237310)." in final
+
+
+def two_calls(code):
+    function = {"name": "execute_python", "arguments": {"code": code}}
+    return {"tool_calls": [{"function": function}, {"function": function}]}
+
+
+@pytest.mark.parametrize(
+    ("web_enabled", "check"),
+    [
+        (True, None),
+        (False, {"kind": "substitution", "expression": "x**2 - 2", "variable": "x"}),
+    ],
+)
+async def test_later_compute_stages_keep_room_for_verify_and_web(web_enabled, check):
+    # Retries, the precision recompute and the fallback used to spend the calls
+    # the trusted check or the web step still needed, so the cap aborted the run.
+    assess = {"sufficient": True, "reason": "p.57", "check": check}
+    client = Client(
+        [
+            {"content": '{"mode": "solve"}'},
+            {"content": json.dumps(assess)},
+            two_calls("result = broken()"),
+            two_calls("result = newton(2)"),
+            {"content": "1.41421"},
+        ]
+    )
+    sandbox, web = FailsUntil(2, value="1.41421"), Web()
+    _, last = await collect(
+        request=AgentRequest("r", SQRT, "sicp", "m", web_enabled=web_enabled),
+        client=client,
+        sandbox=sandbox,
+        counter=Counter(),
+        search=search_with([Candidate("c", "sqrt-iter", 57)], []),
+        web=web,
+    )
+    assert last.kind == "result", last.data.get("message")
+    assert last.data["tool_calls"] <= config.AGENT_MAX_TOOL_CALLS
+    if web_enabled:
+        assert [kind for kind, _ in web.calls] == ["search", "fetch"]
+    else:
+        assert len(sandbox.verified) == 1

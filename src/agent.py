@@ -198,6 +198,9 @@ def relative_to_date(question: str) -> bool:
 # The orchestrator's deterministic coverage verdict, so a small model does not
 # open with what the evidence lacks (run 06 cases 2, 3, 7).
 COVERED_NOTE = "The book evidence above addresses this question. "
+# A book-scoped question skips the web (it cannot answer one better), but that
+# alone does not make the evidence cover it, so it gets no COVERED_NOTE.
+BOOK_SCOPED = "question is about the book"
 NO_RESULT_RULES = (
     "No computed result is available. Explain the method from the book evidence. "
     "Give a final value only if the evidence states it, and then say it comes from "
@@ -303,7 +306,7 @@ def local_coverage(
         refers_to_book(text, request.book_stem)
         for text in (request.question, request.retrieval_query)
     ):
-        return "question is about the book"
+        return "assessed sufficient" if sufficient else BOOK_SCOPED
     return "assessed sufficient" if sufficient else None
 
 
@@ -690,6 +693,19 @@ async def _final_stream(run: _Run, messages, *, think: bool):
 async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
     """compute → verify; yields events and finally (computation, CheckResult)."""
     request = run.request
+    # The question itself defines the check; the model's suggestion is a fallback.
+    check = question_check(request.question) or assessment.verification_check
+
+    def tool_room() -> int:
+        """Tool calls left after keeping back the trusted check and the web step.
+
+        Going over the cap aborts the whole request, so later compute stages
+        only use what is left.
+        """
+        reserved = 1 if check else 0
+        reserved += config.AGENT_WEB_TOOL_CALLS if request.web_enabled else 0
+        return config.AGENT_MAX_TOOL_CALLS - run.tool_calls - reserved
+
     yield AgentEvent("step", {"stage": "compute"})
     run.stages.append("compute")
     messages = [
@@ -710,9 +726,10 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
         reserve=config.AGENT_FINAL_OUTPUT_TOKENS,
     )
 
-    async def run_calls(turn):
+    async def run_calls(turn, room=config.AGENT_MAX_CALLS_PER_MESSAGE):
         result = None
-        calls = turn["message"]["tool_calls"][: config.AGENT_MAX_CALLS_PER_MESSAGE]
+        limit = min(config.AGENT_MAX_CALLS_PER_MESSAGE, max(room, 0))
+        calls = (turn["message"].get("tool_calls") or [])[:limit]
         for call in calls:
             function = call.get("function") or {}
             result = await run.tool(
@@ -724,7 +741,7 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
         return result
 
     computation = await run_calls(turn)
-    if computation is None or computation.status != "ok":
+    if (computation is None or computation.status != "ok") and tool_room() > 0:
         # One bounded repair round: the model answered in prose or its code failed.
         # Never more than one, and it still counts toward every cap.
         if computation is None:
@@ -746,15 +763,15 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
             think=True,
             reserve=config.AGENT_FINAL_OUTPUT_TOKENS,
         )
-        computation = await run_calls(turn) or computation
+        computation = await run_calls(turn, tool_room()) or computation
         # A length stop is a spent budget, not the model's answer, so code that
         # then fails still gets its one repair, if the request cap leaves room
         # for it, a possible candidate turn and the final answer.
-        check = question_check(request.question) or assessment.verification_check
         if (
             ran_out
             and computation is not None
             and computation.status != "ok"
+            and tool_room() > 0
             and run.model_requests + (3 if check else 2)
             <= config.AGENT_MAX_MODEL_REQUESTS
         ):
@@ -770,14 +787,15 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
                 think=True,
                 reserve=config.AGENT_FINAL_OUTPUT_TOKENS,
             )
-            computation = await run_calls(turn) or computation
+            computation = await run_calls(turn, tool_room()) or computation
     # Fewer decimals than asked (the book's 1e-5 tolerance, or rounding in code)
     # is a fixable failure: one recompute, if the cap leaves room, kept only if
     # it fixes the shortfall.
     short = precision_shortfall(request.question, computed_value(computation))
-    check = question_check(request.question) or assessment.verification_check
-    if short and run.model_requests + (3 if check else 2) <= (
-        config.AGENT_MAX_MODEL_REQUESTS
+    if (
+        short
+        and tool_room() > 0
+        and run.model_requests + (3 if check else 2) <= config.AGENT_MAX_MODEL_REQUESTS
     ):
         messages += [
             turn["message"],
@@ -791,7 +809,7 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
             think=True,
             reserve=config.AGENT_FINAL_OUTPUT_TOKENS,
         )
-        better = await run_calls(turn)
+        better = await run_calls(turn, tool_room())
         if (
             better is not None
             and computed_value(better)
@@ -799,15 +817,10 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
         ):
             computation = better
     code = fallback_code(request.question)
-    web_calls = 2 if request.web_enabled else 0
     unusable = not computed_value(computation) or precision_shortfall(
         request.question, computed_value(computation)
     )
-    if (
-        unusable
-        and code
-        and run.tool_calls + 1 + web_calls <= config.AGENT_MAX_TOOL_CALLS
-    ):
+    if unusable and code and tool_room() > 0:
         fallback = await run.tool(
             "compute_fallback",
             "execute_python",
@@ -835,8 +848,6 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
     )
     yield AgentEvent("step", {"stage": "verify"})
     run.stages.append("verify")
-    # The question itself defines the check; the model's suggestion is a fallback.
-    check = question_check(request.question) or assessment.verification_check
     if check is None:
         result = CheckResult("unverified", "No supported symbolic check applies")
     elif not computed_value(computation):
@@ -873,10 +884,8 @@ async def _solve(run: _Run, assessment: LocalAssessment, sandbox):
         if not candidate or len(candidate) > config.MATH_MAX_EXPRESSION_CHARS:
             result = CheckResult("unverified", "No checkable candidate answer")
         else:
-            # Keep room for the optional web search and fetch.
-            room = config.AGENT_MAX_TOOL_CALLS - run.tool_calls
-            room -= 2 if request.web_enabled else 0
-            checked = candidates[: max(room, 1)]
+            # tool_room() kept one call back for this check and the web's own.
+            checked = candidates[: max(tool_room() + 1, 1)]
             results = []
             for value in checked:
                 run.charge_tool()  # internal verification counts toward the tool cap
@@ -1059,7 +1068,7 @@ async def run_agent(
             )
         else:
             instructions = QA_RULES.format(web_note=web_note)
-            if coverage is not None:
+            if coverage not in (None, BOOK_SCOPED):
                 instructions = COVERED_NOTE + instructions
             instructions = PREMISE_RULE + instructions
         # Q&A gets no trace: it cost tokens and was echoed back as "the trace".

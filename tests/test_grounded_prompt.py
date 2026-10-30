@@ -166,3 +166,8 @@ async def test_final_is_told_when_book_evidence_covers_the_question():
     assert agent.COVERED_NOTE in await final_for("Summarize page 1.", False, 1)
     assert agent.COVERED_NOTE in await final_for("What is an interpreter?", True, 796)
     assert agent.COVERED_NOTE not in await final_for("Latest Racket?", False, 300)
+    # Naming the book skips the web but is no claim the evidence covers it.
+    assert agent.COVERED_NOTE not in await final_for(
+        "Does the book discuss quantum computing?", False, 300
+    )
+    assert agent.COVERED_NOTE not in await final_for("Summarize page 9.", False, 300)
