@@ -849,6 +849,48 @@ def qa_script(sufficient=False):
     ]
 
 
+async def test_final_reserve_counts_with_full_sources():
+    client = Client(qa_script(sufficient=True))
+    _, last = await collect(
+        request=AgentRequest("r", "Explain bindings", "sicp", config.OLLAMA_MODEL),
+        client=client,
+        sandbox=Sandbox(),
+        counter=Counter(
+            config.OLLAMA_CONTEXT_TOKENS - config.AGENT_FINAL_OUTPUT_TOKENS
+        ),
+        search=search_with([Candidate("c", "Names refer to values.", 2)], []),
+    )
+    assert last.kind == "result", last.data
+    final = next(
+        r
+        for r in last.data["trace"]
+        if r.get("stage") == "final" and "model_request" in r
+    )
+    assert final["output_reserve"] == config.AGENT_FINAL_OUTPUT_TOKENS
+    assert (
+        final["counted_tokens"] + final["output_reserve"]
+        == config.OLLAMA_CONTEXT_TOKENS
+    )
+    assert "Names refer to values." in client.requests[-1]["messages"][-1]["content"]
+    assert len(client.requests) == 3 and last.data["tool_calls"] == 1
+
+
+async def test_length_stop_never_records_complete_answer():
+    script = qa_script(sufficient=True)
+    script[-1]["done_reason"] = "length"
+    client = Client(script)
+    _, last = await collect(
+        request=AgentRequest("r", "Explain bindings", "sicp", config.OLLAMA_MODEL),
+        client=client,
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("c", "Names refer to values.", 2)], []),
+    )
+    assert last.kind == "result" and last.data["complete"] is False
+    assert last.data["done_reason"] == "length" and len(client.requests) == 3
+    assert last.data["sources"][0].text == "Names refer to values."
+
+
 async def test_requested_page_in_hand_skips_the_web_despite_the_flag():
     web = Web()
     _, last = await collect(
@@ -1290,6 +1332,7 @@ async def test_later_compute_stages_keep_room_for_verify_and_web(web_enabled, ch
 async def checked_qa(monkeypatch, *, slow=False, incomplete=False):
     import time
     from types import SimpleNamespace
+
     from src import entailment
 
     monkeypatch.setattr(config, "CITATION_CHECK_ENABLED", True)

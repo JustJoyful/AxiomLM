@@ -613,7 +613,9 @@ class _Run:
                 "stage": stage,
                 "model_request": self.model_requests,
                 "counted_tokens": counted,
+                "output_reserve": reserve,
                 "served_tokens": turn.get("prompt_eval_count"),
+                "served_output_tokens": turn.get("eval_count"),
                 "done_reason": turn.get("done_reason"),
                 "think": think,
                 "temperature": (options or {}).get(
