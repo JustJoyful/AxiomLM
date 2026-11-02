@@ -60,3 +60,8 @@ architecture.md
 memory.md
 .superpowers/
 docs/superpowers/
+
+# Personal evaluation labels (local only)
+tests/fixtures/phase2/
+tests/fixtures/phase3/
+tests/fixtures/phase4/

@@ -7,16 +7,19 @@ inserts it iteratively into the ChromaDB Local Vector store.
 """
 
 import argparse
+import hashlib
 import json
 import re
 import traceback
+from pathlib import Path
+from typing import Literal
 
 import chromadb
 
 from src import checkpoint, config, db
 from src.config import CHUNK_OVERLAP, CHUNK_SIZE, PARSED_MD, VECTOR_STORE
 from src.db import get_collection, release_ingest_model
-from src.index_metadata import source_segments
+from src.index_metadata import source_segments, validate_book
 from src.index_store import build_index_version, list_books
 from src.late_chunking import embed_context_block, split_context_blocks
 from src.llm import OllamaClient
@@ -458,9 +461,11 @@ def index_chunks_with_pages(
         release_ingest_model()
 
 
-def contextual_chunks(book_stem: str, *, allow_cpu_embeddings: bool = False):
+def contextual_chunks(
+    book_stem: str, *, allow_cpu_embeddings: bool = False, pages_dir: Path | None = None
+):
     """Contextualize under the caller's ingest admission; release every GPU owner."""
-    segments = source_segments(book_stem)
+    segments = source_segments(book_stem, pages_dir=pages_dir)
     if not segments:
         raise ValueError("No checkpoint pages found; run OCR first")
     try:
@@ -486,20 +491,57 @@ def contextual_chunks(book_stem: str, *, allow_cpu_embeddings: bool = False):
         release_ingest_model()
 
 
+def _index_source(
+    book_stem: str, source: Literal["checkpoints", "repaired"]
+) -> tuple[Path | None, dict]:
+    """Pages folder for the chosen source and the provenance the manifest records."""
+    validate_book(book_stem)
+    if source == "checkpoints":
+        return None, {"source": "checkpoints"}
+    if source != "repaired":
+        raise ValueError(f"Unknown index source: {source}")
+    folder = config.REPAIRED_MD / book_stem
+    report = folder / "repair_report.json"
+    if not report.is_file():
+        raise ValueError(f"Repaired source for '{book_stem}' has no repair_report.json")
+
+    def pages(directory: Path) -> list[str]:
+        return sorted(p.name for p in directory.glob("page_*.md"))
+
+    if pages(folder) != pages(config.CHECKPOINTS / book_stem):
+        raise ValueError(
+            f"Repaired page files for '{book_stem}' do not match its checkpoints"
+        )
+    # shortcut: the report has no per-page hashes, so later page edits go unseen.
+    content = json.loads(report.read_text())
+    if content.get("book_stem") != book_stem or content.get("pages") != len(
+        pages(folder)
+    ):
+        raise ValueError(
+            f"repair_report.json for '{book_stem}' does not describe its repaired pages"
+        )
+    digest = hashlib.sha256(report.read_bytes()).hexdigest()
+    return folder, {"source": "repaired", "repair_report_sha256": digest}
+
+
 def index_book(
     book_stem: str,
     reindex: bool = False,
     *,
     allow_cpu_embeddings: bool = False,
     root=VECTOR_STORE,
+    source: Literal["checkpoints", "repaired"] = "checkpoints",
 ) -> int:
     """Build beside existing versions; activate only a complete dense/BM25 pair."""
+    pages_dir, provenance = _index_source(book_stem, source)
     if not reindex and book_stem in list_books(root=root):
         raise ValueError(
             f"Book '{book_stem}' already indexed; use --reindex to build a replacement"
         )
-    chunks = contextual_chunks(book_stem, allow_cpu_embeddings=allow_cpu_embeddings)
-    build_index_version(book_stem, chunks, root=root)
+    chunks = contextual_chunks(
+        book_stem, allow_cpu_embeddings=allow_cpu_embeddings, pages_dir=pages_dir
+    )
+    build_index_version(book_stem, chunks, root=root, provenance=provenance)
     return len(chunks)
 
 
@@ -522,6 +564,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explicitly allow degraded CPU embedding ingestion when CUDA is unavailable.",
     )
+    parser.add_argument(
+        "--source",
+        choices=("checkpoints", "repaired"),
+        default="checkpoints",
+        help="Page text to index: OCR checkpoints or the repaired copies.",
+    )
     return parser
 
 
@@ -535,6 +583,7 @@ def main(argv: list[str] | None = None) -> int:
         args.book_stem,
         reindex=args.reindex,
         allow_cpu_embeddings=args.allow_cpu_embeddings,
+        source=args.source,
     )
     print("=========================================")
     print(

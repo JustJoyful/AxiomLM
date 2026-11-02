@@ -271,6 +271,25 @@ CHAT_TOKENIZER_MODEL_DIGEST = ANSWER_TOKENIZER_MODEL_DIGEST
 CHAT_TOKENIZER_OLLAMA_VERSION = ANSWER_TOKENIZER_OLLAMA_VERSION
 PHASE3_RUNTIME_LOGS = LOGS_DIR / "phase3_runtime"
 PHASE3_AGENT_LOGS = LOGS_DIR / "phase3_agent"
+# Phase 4 entailment scorer: one CPU NLI cross-encoder for the gate and the claim
+# check. Selection evidence: 2026-10-28-phase-4-scorer-decision.md.
+ENTAILMENT_MODEL = "cross-encoder/nli-deberta-v3-xsmall"
+ENTAILMENT_REVISION = "a150876415327c80daeff35ca6f68f5ed8cf5c24"
+ENTAILMENT_DEVICE = "cpu"
+ENTAILMENT_MAX_PARAMETERS = 100_000_000
+ENTAILMENT_FORMULATION = "relevant"
+ENTAILMENT_GATE_THRESHOLD = 0.014954926446080208
+ENTAILMENT_CLAIM_THRESHOLD = 0.05740916728973389
+ENTAILMENT_GATE_ENABLED = False
+# Experimental scorer verdicts remain available offline; too noisy for live answers.
+CITATION_CHECK_ENABLED = False
+ENTAILMENT_BATCH_SIZE = 16
+CITATION_MAX_CLAIMS = 12
+CITATION_MIN_CLAIM_WORDS = 4
+CITATION_CHECK_SECONDS = 15.0
+ENTAILMENT_GATE_MIN_PASS_RATE = 0.8
+PHASE4_LABELS_DIR = ROOT / "tests/fixtures/phase4"
+PHASE4_LOGS = LOGS_DIR / "phase4_eval"
 
 # Web evidence: off by default; /web on grants retrieval permission, not cloud inference.
 WEB_ENABLED_DEFAULT = False

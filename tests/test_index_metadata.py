@@ -113,3 +113,17 @@ def test_adjacent_headings_and_fenced_heading_text_keep_exact_offsets(
     assert all(
         text[r.source_start : r.source_start + len(r.text)] == r.text for r in rows
     )
+
+
+def test_segments_read_from_given_pages_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(m.config, "CHECKPOINTS", tmp_path / "checkpoints")
+    monkeypatch.setattr(m.config, "PARSED_MD", tmp_path)
+    (tmp_path / "checkpoints" / "book").mkdir(parents=True)
+    (tmp_path / "checkpoints" / "book" / "page_0000.md").write_text("original\n")
+    repaired = tmp_path / "repaired" / "book"
+    repaired.mkdir(parents=True)
+    (repaired / "page_0000.md").write_text("repaired\n")
+    rows = m.source_segments("book", pages_dir=repaired)
+    assert [r.text for r in rows] == ["repaired\n"]
+    assert rows[0].source_pages == (1,)
+    assert [r.text for r in m.source_segments("book")] == ["original\n"]

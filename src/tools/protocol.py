@@ -145,7 +145,7 @@ DESCRIPTIONS = {
     "fetch_page": "Fetch readable text from one public web page returned by web_search.",
     "execute_python": "Compute with SymPy in an isolated sandbox; assign the answer to `result`.",
     "generate_pdf": "Generate a PDF document (unavailable until Phase 5).",
-    "verify_citation": "Check a claim against one evidence source (unavailable until Phase 4).",
+    "verify_citation": "Check whether one retrieved evidence source supports a claim.",
 }
 
 _VALIDATORS = {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 
 from src import config
@@ -18,7 +19,6 @@ Handler = Callable[[dict, ToolContext, str], Awaitable[ToolResult]]
 
 UNAVAILABLE = {
     "generate_pdf": "PDF generation is unavailable until Phase 5 (Typst documents).",
-    "verify_citation": "Citation verification is unavailable until Phase 4 (entailment scorer).",
 }
 
 PYTHON_STATUS = {
@@ -32,10 +32,11 @@ PYTHON_STATUS = {
 
 
 class ToolRegistry:
-    def __init__(self, *, sandbox=None, search=None, web=None):
+    def __init__(self, *, sandbox=None, search=None, web=None, evidence=None):
         self.sandbox = sandbox
         self._search = search
         self._web = web
+        self._evidence = evidence
         self.calls = 0
 
     async def _search_local(self, arguments, context, call_id):
@@ -79,6 +80,50 @@ class ToolRegistry:
         value = arguments["query"] if name == "web_search" else arguments["url"]
         return await handler(value, context, call_id=call_id)
 
+    async def _verify_citation(self, arguments, context, call_id):
+        name = "verify_citation"
+        if self._evidence is None:
+            return ToolResult(
+                call_id,
+                name,
+                "unavailable",
+                {"error": "Evidence lookup is unavailable"},
+            )
+        source = self._evidence(arguments["source_id"])
+        if source is None:
+            return ToolResult(
+                call_id, name, "error", {"error": "Unknown evidence source ID"}
+            )
+        from src.citation_check import verify
+        from src.entailment import get_scorer
+
+        try:
+
+            def check():
+                return verify(arguments["claim"], source, get_scorer().score)
+
+            supported, value = await asyncio.wait_for(
+                asyncio.to_thread(check), config.CITATION_CHECK_SECONDS
+            )
+        except Exception as exc:  # noqa: BLE001 - surface scorer failures
+            return ToolResult(
+                call_id,
+                name,
+                "unavailable",
+                {"error": f"Entailment scorer unavailable: {exc}"},
+            )
+        return ToolResult(
+            call_id,
+            name,
+            "ok",
+            {
+                "source_id": source.source_id,
+                "supported": supported,
+                "score": value,
+                "threshold": config.ENTAILMENT_CLAIM_THRESHOLD,
+            },
+        )
+
     async def dispatch(
         self, call_id: str, name: object, arguments: object, context: ToolContext
     ) -> ToolResult:
@@ -101,6 +146,8 @@ class ToolRegistry:
             )
         if name == "search_local_index":
             result = await self._search_local(arguments, context, call_id)
+        elif name == "verify_citation":
+            result = await self._verify_citation(arguments, context, call_id)
         elif name == "execute_python":
             result = await self._python(arguments, context, call_id)
         else:

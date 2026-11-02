@@ -10,3 +10,6 @@ def _pin_phase2_tui_path(monkeypatch):
     from src import config
 
     monkeypatch.setattr(config, "AGENT_ROUTING_ENABLED", False)
+
+    monkeypatch.setattr(config, "ENTAILMENT_GATE_ENABLED", False)
+    monkeypatch.setattr(config, "CITATION_CHECK_ENABLED", False)

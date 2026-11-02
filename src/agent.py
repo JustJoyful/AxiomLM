@@ -926,7 +926,14 @@ async def run_agent(
     run = _Run(
         request,
         client,
-        ToolRegistry(sandbox=sandbox, search=search, web=web),
+        ToolRegistry(
+            sandbox=sandbox,
+            search=search,
+            web=web,
+            evidence=lambda source_id: next(
+                (s for s in run.sources if s.source_id == source_id), None
+            ),
+        ),
         counter,
         asyncio.get_running_loop().time() + config.AGENT_REQUEST_SECONDS,
     )
@@ -1135,10 +1142,24 @@ async def run_agent(
                 yield AgentEvent("token", {"text": item})
             else:
                 final = item
+        citations = None
+        if config.CITATION_CHECK_ENABLED:
+            if not final["complete"]:
+                citations = {"status": "skipped", "reason": "incomplete"}
+            else:
+                from src.citation_check import run_check
+
+                yield step("citation_check")
+                citations = await run_check(
+                    "".join(tokens),
+                    run.sources,
+                    remaining=run.deadline - asyncio.get_running_loop().time(),
+                )
         yield AgentEvent(
             "result",
             {
-                "answer": "".join(tokens),
+                "answer": (citations or {}).get("answer", "".join(tokens)),
+                **({"citations": citations} if citations is not None else {}),
                 # A length stop is a failed completion, never an answered case.
                 "complete": final["complete"],
                 "done_reason": final["done_reason"],
