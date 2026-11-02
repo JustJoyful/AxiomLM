@@ -20,6 +20,42 @@ def test_merge_interleaves_without_comparing_scales_and_keeps_both_ranks():
     assert not hybrid.merge_ranked_candidates([], [])
 
 
+def test_rrf_rewards_shared_hit_without_changing_sources():
+    meta = {
+        "physical_pages": "[2, 3]",
+        "physical_page_start": 2,
+        "physical_page_end": 3,
+    }
+    dense = [hit("a", "dense", 0.1), hit("b", "dense", 0.2, meta=meta)]
+    sparse = [hit("b", "bm25", -10, meta=meta), hit("c", "bm25", -5)]
+    result = hybrid.merge_ranked_candidates(dense, sparse, policy="rrf")
+    assert [c.chunk_id for c in result] == ["b", "a", "c"]
+    assert result[0].metadata is meta and result[0].text == "b"
+    assert result[0].dense_rank == 2 and result[0].bm25_rank == 1
+
+
+def test_rrf_ties_use_chunk_id():
+    result = hybrid.merge_ranked_candidates(
+        [hit("z", "dense")], [hit("a", "bm25")], policy="rrf"
+    )
+    assert [c.chunk_id for c in result] == ["a", "z"]
+
+
+def test_conflicting_shared_ids_still_fail_for_rrf():
+    with pytest.raises(ValueError, match="Conflicting"):
+        hybrid.merge_ranked_candidates(
+            [hit("a", "dense")], [hit("a", "bm25", text="changed")], policy="rrf"
+        )
+
+
+def test_unknown_policy_and_invalid_rrf_constant_fail(monkeypatch):
+    with pytest.raises(ValueError, match="policy"):
+        hybrid.merge_ranked_candidates([], [], policy="guess")
+    monkeypatch.setattr(hybrid.config, "HYBRID_RRF_K", 0)
+    with pytest.raises(ValueError, match="RRF"):
+        hybrid.merge_ranked_candidates([], [], policy="rrf")
+
+
 @pytest.mark.parametrize(
     "cue",
     [
@@ -67,11 +103,14 @@ def test_page_sets_preserve_gaps_and_legacy_fallback():
         physical_pages_for({"physical_pages": "[0]"})
 
 
+@pytest.mark.parametrize("policy", ["interleave", "rrf"])
 def test_real_pair_filter_refill_and_index_policy_precede_each_embedding(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, policy
 ):
     from src import db, index_store, tui
     from src.late_chunking import EmbeddedChunk
+
+    monkeypatch.setattr(hybrid.config, "HYBRID_MERGE_POLICY", policy)
 
     rows = [
         EmbeddedChunk(
@@ -132,10 +171,18 @@ def test_real_pair_filter_refill_and_index_policy_precede_each_embedding(
     ]
     handle = operation("book", root=tmp_path)
     events.append(("resolve", "book"))
+    diagnostic = {}
     selected = hybrid.retrieve_hybrid(
-        handle, "arithmetic", (5, 5), 2, 2, candidate_limit=5
+        handle, "arithmetic", (5, 5), 2, 2, candidate_limit=5, diagnostics=diagnostic
     )
     assert {c.chunk_id for c in selected} == {"3", "4"}
+    assert diagnostic["page_filter"] == (5, 5)
+    assert diagnostic["policy"] == policy
+    assert {h["chunk_id"] for h in diagnostic["raw_dense"]} == {"3", "4"}
+    assert {h["metadata"]["physical_pages"] for h in diagnostic["merged"]} == {
+        "[4,5]",
+        "[5,6]",
+    }
     events.append(("resolve", "book"))
     filled = hybrid.retrieve_hybrid(
         handle, "arithmetic", None, 2, 2, candidate_limit=15
@@ -244,3 +291,19 @@ def test_all_dropped_returns_empty_not_original():
         [],
         1,
     )
+
+
+def test_shipping_merge_default_is_interleave():
+    import subprocess
+    import sys
+
+    # Read the installed default in a fresh process, outside patched fixtures.
+    result = subprocess.check_output(
+        [
+            sys.executable,
+            "-c",
+            "from src.config import HYBRID_MERGE_POLICY; print(HYBRID_MERGE_POLICY)",
+        ],
+        text=True,
+    )
+    assert result.strip() == "interleave"

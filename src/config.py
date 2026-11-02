@@ -164,6 +164,8 @@ PHASE2_QUERY_POLICY = "named_retrieval_query"
 PHASE2_INDEX_MANIFEST_PATH = VECTOR_STORE / "active_indexes.json"
 PHASE2_BM25_DIR = VECTOR_STORE / "bm25"
 HYBRID_CANDIDATE_LIMIT = 15
+HYBRID_MERGE_POLICY = "interleave"
+HYBRID_RRF_K = 60
 HYBRID_DENSE_FETCH = 30
 HYBRID_BM25_FETCH = 30
 HYBRID_FETCH_BATCH = 15
@@ -290,6 +292,8 @@ CITATION_CHECK_SECONDS = 15.0
 ENTAILMENT_GATE_MIN_PASS_RATE = 0.8
 PHASE4_LABELS_DIR = ROOT / "tests/fixtures/phase4"
 PHASE4_LOGS = LOGS_DIR / "phase4_eval"
+PHASE6_LOGS = LOGS_DIR / "phase6"
+PHASE6_QUALITY_CONTROLS = PHASE4_LOGS / "2026-11-01-phase5-comparison"
 
 # Web evidence: off by default; /web on grants retrieval permission, not cloud inference.
 WEB_ENABLED_DEFAULT = False

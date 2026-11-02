@@ -7,7 +7,7 @@ import math
 import re
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from itertools import zip_longest
 
 from src import config, db
@@ -53,7 +53,16 @@ def merge_ranked_candidates(
     dense: Sequence[SearchHit],
     bm25: Sequence[SearchHit],
     limit: int = config.HYBRID_CANDIDATE_LIMIT,
+    *,
+    policy: str | None = None,
 ) -> list[MergedCandidate]:
+    policy = config.HYBRID_MERGE_POLICY if policy is None else policy
+    if policy not in {"interleave", "rrf"}:
+        raise ValueError("Unknown merge policy")
+    if policy == "rrf" and (
+        type(config.HYBRID_RRF_K) is not int or config.HYBRID_RRF_K < 1
+    ):
+        raise ValueError("RRF constant must be a positive integer")
     if not 1 <= limit <= config.HYBRID_CANDIDATE_LIMIT:
         raise ValueError("Invalid candidate count")
     dense = sorted(dense, key=lambda h: (h.score, h.chunk_id))
@@ -68,6 +77,27 @@ def merge_ranked_candidates(
         documents[h.chunk_id] = content
     dr = {h.chunk_id: (i + 1, h.score) for i, h in enumerate(dense)}
     br = {h.chunk_id: (i + 1, h.score) for i, h in enumerate(bm25)}
+    if policy == "rrf":
+        scores = {
+            cid: sum(
+                1 / (config.HYBRID_RRF_K + ranks[cid][0])
+                for ranks in (dr, br)
+                if cid in ranks
+            )
+            for cid in documents
+        }
+        return [
+            MergedCandidate(
+                chunk_id=cid,
+                text=documents[cid][0],
+                metadata=documents[cid][1],
+                dense_rank=dr.get(cid, (None, None))[0],
+                bm25_rank=br.get(cid, (None, None))[0],
+                dense_distance=dr.get(cid, (None, None))[1],
+                bm25_score=br.get(cid, (None, None))[1],
+            )
+            for cid in sorted(scores, key=lambda cid: (-scores[cid], cid))[:limit]
+        ]
     ordered = []
     seen = set()
     for pair in zip_longest(dense, bm25):
@@ -102,6 +132,7 @@ def retrieve_hybrid(
     candidate_limit: int = config.HYBRID_CANDIDATE_LIMIT,
     *,
     distance_threshold: float = config.DISTANCE_THRESHOLD,
+    diagnostics: dict | None = None,
 ) -> list[MergedCandidate]:
     vector = db.embed_query(query, prompt_policy=index.query_prompt_policy)
     if not index.legacy and (index.bm25_path is None or not index.bm25_path.is_file()):
@@ -117,6 +148,7 @@ def retrieve_hybrid(
         raise ValueError("Fetch limits must be positive")
     while True:
         dense = []
+        raw_dense = []
         sparse = []
         if dense_count:
             args = {
@@ -146,10 +178,10 @@ def retrieve_hybrid(
                     strict=True,
                 )
             ):
+                hit = SearchHit(cid, text, meta, "dense", i + 1, float(score))
+                raw_dense.append(hit)
                 if score < distance_threshold:
-                    dense.append(
-                        SearchHit(cid, text, meta, "dense", i + 1, float(score))
-                    )
+                    dense.append(hit)
         raw_sparse = []
         if index.bm25_path is not None and expression:
             with sqlite3.connect(
@@ -185,6 +217,17 @@ def retrieve_hybrid(
             or sparse_n >= config.HYBRID_MAX_FETCH
         )
         if len(merged) >= candidate_limit or (dense_exhausted and sparse_exhausted):
+            if diagnostics is not None:
+                diagnostics.update(
+                    query=query,
+                    page_filter=page_filter,
+                    distance_threshold=distance_threshold,
+                    raw_dense=[asdict(h) for h in raw_dense],
+                    dense=[asdict(h) for h in dense],
+                    bm25=[asdict(h) for h in sparse],
+                    merged=[asdict(c) for c in merged],
+                    policy=config.HYBRID_MERGE_POLICY,
+                )
             return merged
         if not dense_exhausted:
             dense_n = min(config.HYBRID_MAX_FETCH, dense_n + config.HYBRID_FETCH_BATCH)
