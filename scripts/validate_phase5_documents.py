@@ -110,6 +110,16 @@ async def validate_documents(*, output: Path) -> dict:
                 "compiler resource and process-tree isolation",
                 "live generation and content fidelity",
             ]
+        statuses = {case["case"]: case["status"] for case in report["cases"]}
+        report["checks_passed"] = (
+            available
+            and report.get("host_security_tests", {}).get("returncode") == 0
+            and all(statuses.get(f"math-{i}") == "ok" for i in (1, 2, 3))
+            and all(
+                statuses.get(name) == "syntax_error"
+                for name in ("host-read", "package-fetch")
+            )
+        )
         json.dump(report, handle, indent=2)
     return report
 
@@ -119,7 +129,17 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     report = asyncio.run(validate_documents(output=args.output))
-    print(json.dumps(report["compiler"]))
+    print(
+        json.dumps(
+            {
+                "compiler": report["compiler"],
+                "checks_passed": report["checks_passed"],
+                "report": str(args.output.resolve()),
+            }
+        )
+    )
+    if not report["checks_passed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

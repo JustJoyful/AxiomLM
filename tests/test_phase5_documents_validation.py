@@ -19,3 +19,27 @@ async def test_missing_typst_is_unavailable_not_accepted(tmp_path, monkeypatch):
     assert report["accepted"] is False
     assert report["compiler"]["available"] is False
     assert report["human_review"] is None
+
+
+def test_cli_exits_nonzero_and_reports_failed_host_checks(
+    tmp_path, monkeypatch, capsys
+):
+    import sys
+
+    async def failed(*, output):
+        return {
+            "compiler": {"available": True},
+            "host_security_tests": {"returncode": 1},
+            "checks_passed": False,
+        }
+
+    monkeypatch.setattr(v, "validate_documents", failed)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["validate_phase5_documents.py", "--output", str(tmp_path / "report.json")],
+    )
+    with pytest.raises(SystemExit) as error:
+        v.main()
+    assert error.value.code == 1
+    assert '"checks_passed": false' in capsys.readouterr().out
