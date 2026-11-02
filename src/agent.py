@@ -644,6 +644,8 @@ class _Run:
             "status": result.status,
             "call_id": call_id,
         }
+        if name == "search_local_index" and result.status == "ok":
+            row["index_version"] = result.data.get("index_version")
         # The final prompt never sees the trace; these make failures debuggable.
         if name == "execute_python" and isinstance(arguments, dict):
             row["code"] = str(arguments.get("code", ""))[:600]
