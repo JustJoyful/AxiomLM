@@ -32,7 +32,16 @@ PYTHON_STATUS = {
 
 
 class ToolRegistry:
-    def __init__(self, *, sandbox=None, search=None, web=None, evidence=None):
+    def __init__(
+        self,
+        *,
+        sandbox=None,
+        search=None,
+        web=None,
+        evidence=None,
+        documents: Handler | None = None,
+    ):
+        self._documents = documents
         self.sandbox = sandbox
         self._search = search
         self._web = web
@@ -140,11 +149,13 @@ class ToolRegistry:
                 {"error": f"{name} is not permitted at stage {context.stage}"},
             )
         self.calls += 1
-        if name in UNAVAILABLE:
+        if name in UNAVAILABLE and self._documents is None:
             return ToolResult(
                 call_id, name, "unavailable", {"error": UNAVAILABLE[name]}
             )
-        if name == "search_local_index":
+        if name == "generate_pdf":
+            result = await self._documents(arguments, context, call_id)
+        elif name == "search_local_index":
             result = await self._search_local(arguments, context, call_id)
         elif name == "verify_citation":
             result = await self._verify_citation(arguments, context, call_id)

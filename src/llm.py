@@ -190,6 +190,7 @@ class OllamaClient:
         num_predict: int,
         timeout: float,
         options: JsonObject | None = None,
+        response_format: str | None = None,
     ) -> AsyncIterator[JsonObject]:
         """Stream native chat chunks under one total deadline, silent gaps included.
 
@@ -207,6 +208,8 @@ class OllamaClient:
                 **(options or {}),
             },
         }
+        if response_format is not None:
+            payload["format"] = response_format
         if tools:
             payload["tools"] = tools
         loop = asyncio.get_running_loop()
@@ -255,6 +258,7 @@ class OllamaClient:
         timeout: float,
         on_chunk: Callable[[JsonObject], None] | None = None,
         options: JsonObject | None = None,
+        response_format: str | None = None,
     ) -> JsonObject:
         """Aggregate one streamed turn; raw thinking/tool_calls are kept for replay."""
         content, thinking, calls, final = [], [], [], None
@@ -266,6 +270,11 @@ class OllamaClient:
             num_predict=num_predict,
             timeout=timeout,
             options=options,
+            **(
+                {"response_format": response_format}
+                if response_format is not None
+                else {}
+            ),
         ):
             message = chunk.get("message") or {}
             content.append(message.get("content") or "")

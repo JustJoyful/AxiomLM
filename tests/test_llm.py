@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -337,3 +339,24 @@ async def test_per_call_options_override_sampling_only_for_that_request():
     assert seen[0]["num_predict"] == 9 and seen[0]["num_ctx"]
     assert seen[2]["temperature"] == OllamaClient._options()["temperature"]
     assert "seed" not in seen[2]
+
+
+@pytest.mark.asyncio
+async def test_practice_json_format_is_sent_only_when_requested():
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return _chat_stream(
+            [{"message": {"content": "{}"}, "done": True, "done_reason": "stop"}]
+        )
+
+    client = OllamaClient(async_transport=httpx.MockTransport(handler))
+    kwargs = {"model": "m", "tools": None, "think": False, "num_predict": 10, "timeout": 1}
+    await client.achat(
+        [{"role": "user", "content": "JSON"}], response_format="json", **kwargs
+    )
+    await client.achat([{"role": "user", "content": "text"}], **kwargs)
+    assert bodies[0]["format"] == "json"
+    assert "format" not in bodies[1]
+    assert bodies[0]["keep_alive"] == 0

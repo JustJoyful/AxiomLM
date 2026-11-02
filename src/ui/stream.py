@@ -61,6 +61,7 @@ class TurnRecord:
     unsupported: list[str] = field(default_factory=list)
     citation_status: str = ""
     citation_reason: str = ""
+    index_version: str | None = None
 
     def set_answer(self, raw):
         self.raw_answer = raw
@@ -210,6 +211,7 @@ class StudyStream(VerticalScroll):
                 "DONE",
                 "ERROR",
                 "CANCELLED",
+                "PRACTICE",
             }:
                 break
             await oldest.remove()
