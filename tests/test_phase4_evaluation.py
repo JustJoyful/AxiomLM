@@ -1,7 +1,7 @@
 import copy
-from contextlib import asynccontextmanager
 import hashlib
 import json
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -102,6 +102,22 @@ def test_unsplit_case_is_rejected(tmp_path):
         _load(tmp_path, labels)
 
 
+def test_unknown_split_id_is_named_alone(tmp_path):
+    labels = _labels(tmp_path)
+    labels["splits"]["test"].append("typo")
+    with pytest.raises(ValueError, match=r"unknown split ids: \['typo'\]$"):
+        _load(tmp_path, labels)
+
+
+def test_answerable_unanswerable_kind_is_rejected(tmp_path):
+    labels = _labels(tmp_path)
+    case = _case(labels, "d")
+    case.update(answerable=True, relevant_pages=[1])
+    case["expected_claims"] = [{"claim": "x", "source_pages": [1]}]
+    with pytest.raises(ValueError, match="only unanswerable cases"):
+        _load(tmp_path, labels)
+
+
 def test_unknown_kind_is_rejected(tmp_path):
     labels = _labels(tmp_path)
     _case(labels, "a")["kind"] = "trivia"
@@ -189,6 +205,26 @@ def test_phase2_reference_cases_are_merged(tmp_path):
     assert old["split"] == "calibration"
 
 
+def test_phase2_case_outside_phase4_kinds_cannot_enter_test_split(tmp_path):
+    labels = _labels(tmp_path)
+    _phase2_reference(tmp_path, labels)
+    labels["splits"]["calibration"].remove("old")
+    labels["splits"]["test"].append("old")
+    with pytest.raises(ValueError, match="non-Phase 4 kinds"):
+        _load(tmp_path, labels)
+
+
+def test_malformed_phase2_case_is_rejected(tmp_path):
+    labels = _labels(tmp_path)
+    path = _phase2_reference(tmp_path, labels)
+    phase2 = json.loads(path.read_text())
+    phase2["cases"][0]["expected_claims"][0]["source_pages"] = [2]
+    path.write_text(json.dumps(phase2))
+    labels["phase2_reference"]["sha256"] = ev.digest(path)
+    with pytest.raises(ValueError, match="case old: claim pages"):
+        _load(tmp_path, labels)
+
+
 def test_changed_phase2_reference_is_rejected(tmp_path):
     labels = _labels(tmp_path)
     path = _phase2_reference(tmp_path, labels)
@@ -246,6 +282,7 @@ def test_abstained_matches_canonical_sentence_and_disclaimer():
     from src.page_querying import ABSTENTION
 
     assert ev.abstained(ABSTENTION + " Try another chapter.")
+    assert ev.abstained("\n\n" + ABSTENTION)
     assert ev.abstained("The book does not cover the weather.")
     assert not ev.abstained("An interpreter evaluates expressions.")
     assert not ev.abstained("")
@@ -274,6 +311,21 @@ def test_answer_metrics_counts_abstention_and_premise():
     assert m["heuristic"] == ["abstained", "rejected"]
 
 
+def test_incomplete_answers_never_count_as_abstained_or_rejected():
+    from src.page_querying import ABSTENTION
+
+    cases = [
+        _metric_case("none", answerable=False),
+        _metric_case("premise", false_premise=True),
+    ]
+    rows = [
+        _row("none", ABSTENTION, complete=False),
+        _row("premise", "That is incorrect", complete=False),
+    ]
+    m = ev.answer_metrics(cases, rows)
+    assert (m["abstained"], m["rejected"]) == (0, 0)
+
+
 def test_claim_metrics_skip_unjudged_rows():
     judged = _row(
         "a",
@@ -296,11 +348,14 @@ def test_expected_claim_recall_uses_supporting_sources_only():
     ]
     rows = [
         _row("a", sources=sources, supporting_source_ids=["s2"]),
-        _row("b", sources=sources),
+        _row("b", sources=sources, supporting_source_ids=["s2"]),
     ]
     m = ev.expected_claim_recall(cases, rows)
     assert (m["expected_claims"], m["cited_expected"]) == (2, 1)
     assert m["supported_citation_recall"] == 0.5
+    # Retrieved pages of an unjudged row are not supporting citations.
+    unjudged = ev.expected_claim_recall(cases, [_row("b", sources=sources)])
+    assert unjudged["cited_expected"] == 0
 
 
 def test_retrieval_metrics_use_context_pages():
@@ -390,17 +445,21 @@ async def test_followup_history_reaches_rewrite(monkeypatch):
     assert set(row["stage_seconds"]) == {"route"}
 
 
-def _eval_setup(tmp_path, monkeypatch):
-    """A real one-book store plus a valid label file, both under tmp_path."""
+def _eval_setup(tmp_path, monkeypatch, *, provenance=None):
+    """A real one-book store built from repaired pages plus a valid label file."""
     from src import index_store
     from tests.test_index_store import chunks
 
+    (tmp_path / "book_labels.json").write_text(json.dumps(_labels(tmp_path)))
+    report = tmp_path / "pages" / "book" / "repair_report.json"
+    report.write_text(json.dumps({"book_stem": "book", "pages": 2}))
+    if provenance is None:
+        provenance = {"source": "repaired", "repair_report_sha256": ev.digest(report)}
     store = tmp_path / "store"
-    index_store.build_index_version("book", chunks(), root=store)
+    index_store.build_index_version("book", chunks(), root=store, provenance=provenance)
     monkeypatch.setattr(ev.config, "VECTOR_STORE", store)
     monkeypatch.setattr(ev.config, "REPAIRED_MD", tmp_path / "pages")
     monkeypatch.setattr(ev.config, "PHASE4_LABELS_DIR", tmp_path)
-    (tmp_path / "book_labels.json").write_text(json.dumps(_labels(tmp_path)))
     monkeypatch.setattr(ev, "identities", lambda paths: {"code_sha256": list(paths)})
     monkeypatch.setattr(ev, "sampling_record", lambda: {"final": {}})
 
@@ -473,6 +532,38 @@ async def test_active_store_is_not_modified(tmp_path, monkeypatch):
     assert report["store_unchanged"] is True and tree_identity(store) == before
 
 
+@pytest.mark.parametrize(
+    ("provenance", "message"),
+    [
+        ({"source": "checkpoints"}, "not built from repaired pages"),
+        ({"source": "repaired", "repair_report_sha256": "0" * 64}, "predates"),
+    ],
+)
+async def test_index_not_built_from_current_repair_fails(
+    tmp_path, monkeypatch, provenance, message
+):
+    _eval_setup(tmp_path, monkeypatch, provenance=provenance)
+    _fake_agent(monkeypatch)
+    report = await _evaluate_in_thread(
+        split="test", pipeline="baseline", output=tmp_path / "out.json"
+    )
+    assert report["status"] == "failed" and message in report["error"]
+    assert report["rows"] == [] and report["metrics"] is None
+    assert report["index_version"]["source"] == provenance["source"]
+
+
+async def test_store_changed_during_run_fails_report(tmp_path, monkeypatch):
+    _eval_setup(tmp_path, monkeypatch)
+    _fake_agent(monkeypatch)
+    identities = iter(["before", "after"])
+    monkeypatch.setattr(ev, "tree_identity", lambda _: next(identities))
+    report = await _evaluate_in_thread(
+        split="test", pipeline="baseline", output=tmp_path / "out.json"
+    )
+    assert report["store_unchanged"] is False and report["status"] == "failed"
+    assert "store changed" in report["error"]
+
+
 def test_unknown_pipeline_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="unknown pipeline"):
         ev.evaluate("book", split="test", pipeline="gated", output=tmp_path / "o")
@@ -487,4 +578,4 @@ def test_phase4_label_set_is_complete(book):
     test = ev.cases_for(labels, "test")
     assert {c["kind"] for c in test} == ev.KINDS
     assert len(labels["cases"]) >= 12
-    assert labels["review"]["status"] == "unreviewed"
+    assert labels["review"]["status"] == "maintainer-reviewed"

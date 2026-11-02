@@ -56,7 +56,14 @@ CODE = (
     "src/agent.py",
     "src/retrieval.py",
     "src/hybrid_retrieval.py",
+    "src/query_rewriting.py",
+    "src/page_querying.py",
+    "src/tools/protocol.py",
+    "src/tools/registry.py",
+    "src/tools/local.py",
     "scripts/evaluate_phase4.py",
+    "scripts/evaluate_phase3_baseline.py",
+    "scripts/validate_phase3_agent.py",
 )
 
 
@@ -69,10 +76,13 @@ def _claim_pages(case: dict) -> list[int]:
     return [p for claim in case["expected_claims"] for p in claim["source_pages"]]
 
 
-def _check_case(case: dict) -> None:
+def _check_case(case: dict, *, phase2: bool = False) -> None:
+    """Phase 2 cases keep their original kind, so only their structure is checked."""
     cid = case["case_id"]
-    if case["kind"] not in KINDS:
+    if not phase2 and case["kind"] not in KINDS:
         raise ValueError(f"case {cid}: unknown kind {case['kind']!r}")
+    if (case["kind"] == "unanswerable") == case["answerable"]:
+        raise ValueError(f"case {cid}: only unanswerable cases may be unanswerable")
     if case["kind"] == "contradiction" and case["false_premise"] is not True:
         raise ValueError(f"case {cid}: contradiction needs false_premise true")
     if case["answerable"]:
@@ -84,10 +94,13 @@ def _check_case(case: dict) -> None:
             _claim_pages(case)
         ) <= set(case["relevant_pages"]):
             raise ValueError(f"case {cid}: claim pages must be nonempty relevant pages")
-    elif case["relevant_pages"] or case["expected_claims"]:
+    # Phase 2 unanswerable cases carry one page-less behavioural claim.
+    elif (
+        case["relevant_pages"]
+        or _claim_pages(case)
+        or (case["expected_claims"] and not phase2)
+    ):
         raise ValueError(f"case {cid}: unanswerable case has pages or claims")
-    elif case["kind"] != "unanswerable":
-        raise ValueError(f"case {cid}: only unanswerable cases may be unanswerable")
 
 
 def load_labels(path: Path, *, pages_root: Path = config.REPAIRED_MD) -> dict:
@@ -115,6 +128,8 @@ def load_labels(path: Path, *, pages_root: Path = config.REPAIRED_MD) -> dict:
         cases = [
             {**phase2[cid], "false_premise": False} for cid in reference["case_ids"]
         ]
+        for case in cases:
+            _check_case(case, phase2=True)
     cases += labels["cases"]
     ids = [c["case_id"] for c in cases]
     if len(ids) != len(set(ids)):
@@ -128,8 +143,13 @@ def load_labels(path: Path, *, pages_root: Path = config.REPAIRED_MD) -> dict:
     if calibration | test != set(ids):
         raise ValueError(
             f"cases not in a split: {sorted(set(ids) - calibration - test)}; "
-            f"unknown split ids: {sorted(calibration | test - set(ids))}"
+            f"unknown split ids: {sorted((calibration | test) - set(ids))}"
         )
+    stray = sorted(
+        c["case_id"] for c in cases if c["case_id"] in test and c["kind"] not in KINDS
+    )
+    if stray:
+        raise ValueError(f"test split holds non-Phase 4 kinds: {stray}")
     hashes = labels["source_pages"]
     for page in sorted(
         {p for c in cases for p in c["relevant_pages"] + _claim_pages(c)}
@@ -161,16 +181,16 @@ def retrieval_metrics(cases: list[dict], rows: list[dict]) -> dict:
 
 
 def abstained(answer: str) -> bool:
-    return answer.startswith(ABSTENTION) or bool(_DISCLAIMER.search(answer))
+    return answer.lstrip().startswith(ABSTENTION) or bool(_DISCLAIMER.search(answer))
 
 
 def answer_metrics(cases: list[dict], rows: list[dict]) -> dict:
-    """Missing or failed rows stay in every denominator; they never count as success."""
+    """Missing, failed or incomplete rows stay in every denominator; never a success."""
     by_id = {r["case_id"]: r for r in rows}
 
     def answer(case: dict) -> str | None:
         row = by_id.get(case["case_id"])
-        if row is None or row["error"] is not None:
+        if row is None or row["error"] is not None or not row["complete"]:
             return None
         return row["answer"] or ""
 
@@ -178,10 +198,7 @@ def answer_metrics(cases: list[dict], rows: list[dict]) -> dict:
     unanswerable = [c for c in cases if not c["answerable"]]
     premise = [c for c in cases if c["false_premise"]]
     answered = sum(
-        answer(c) is not None
-        and by_id[c["case_id"]]["complete"]
-        and not abstained(answer(c))
-        for c in answerable
+        answer(c) is not None and not abstained(answer(c)) for c in answerable
     )
     abstentions = sum(
         answer(c) is not None and abstained(answer(c)) for c in unanswerable
@@ -228,11 +245,14 @@ def expected_claim_recall(cases: list[dict], rows: list[dict]) -> dict:
     expected = cited = 0
     for case in cases:
         row = by_id.get(case["case_id"], {})
-        sources = row.get("sources", [])
-        if "supporting_source_ids" in row:
-            keep = set(row["supporting_source_ids"])
-            sources = [s for s in sources if s["source_id"] in keep]
-        pages = {p for s in sources for p in s["pages"]}
+        # An unjudged row has no supporting sources; retrieved is not supported.
+        keep = set(row.get("supporting_source_ids", ()))
+        pages = {
+            p
+            for s in row.get("sources", [])
+            if s["source_id"] in keep
+            for p in s["pages"]
+        }
         # Behavioural claims without pages (e.g. "say the book does not cover it")
         # cannot be cited, so they are outside this denominator.
         for claim in case["expected_claims"]:
@@ -244,6 +264,17 @@ def expected_claim_recall(cases: list[dict], rows: list[dict]) -> dict:
         "cited_expected": cited,
         "supported_citation_recall": _rate(cited, expected),
     }
+
+
+def _check_index_source(entry: dict | None, book: str) -> None:
+    """Labels pin repaired page text, so only an index built from that text is scored."""
+    report = config.REPAIRED_MD / book / "repair_report.json"
+    if entry is None or entry.get("source") != "repaired":
+        raise ValueError(f"Active index for '{book}' was not built from repaired pages")
+    if not report.is_file() or entry.get("repair_report_sha256") != digest(report):
+        raise ValueError(
+            f"Active index for '{book}' predates the current repair report"
+        )
 
 
 def _book_pages(sources) -> list[int]:
@@ -377,11 +408,15 @@ async def _evaluate(report: dict, cases: list[dict], book: str, store: Path) -> 
         index_store, "resolve_index", lambda stem, **_: resolve(stem, root=store)
     ):
         handle = index_store.resolve_index(book)
+        entry = index_store.read_manifest(store).get(book)
         report["index_version"] = {
             "version_id": handle.version_id,
             "legacy": handle.legacy,
             "embedding_signature": handle.embedding_signature,
+            "source": entry and entry.get("source"),
+            "repair_report_sha256": entry and entry.get("repair_report_sha256"),
         }
+        _check_index_source(None if handle.legacy else entry, book)
         async with _services(report) as services:
             for case in cases:
                 row = await run_case(case, book, **services)
@@ -456,6 +491,10 @@ def evaluate(
             raise
     finally:
         report["store_unchanged"] = tree_identity(config.VECTOR_STORE) == store_before
+        if not report["store_unchanged"] and report["status"] == "complete":
+            report.update(
+                status="failed", error="active vector store changed during evaluation"
+            )
         report["finished_utc"] = datetime.now(UTC).isoformat()
         finish(stream, report)
     return report

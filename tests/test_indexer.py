@@ -68,7 +68,9 @@ def _source_tree(tmp_path, monkeypatch, *, repaired_pages, report=True):
     for i in range(repaired_pages):
         (repaired / f"page_{i:04d}.md").write_text(f"repaired {i}\n")
     if report:
-        (repaired / "repair_report.json").write_text(json.dumps({"pages": 2}))
+        (repaired / "repair_report.json").write_text(
+            json.dumps({"book_stem": "book", "pages": 2})
+        )
     return repaired
 
 
@@ -111,6 +113,26 @@ def test_repaired_source_requires_repair_report(tmp_path, monkeypatch):
     _fake_chunks(monkeypatch, calls := [])
     with pytest.raises(ValueError, match="repair_report.json"):
         indexer.index_book("book", source="repaired", root=tmp_path / "store")
+    assert calls == []
+
+
+def test_repaired_source_requires_report_describing_its_pages(tmp_path, monkeypatch):
+    import json
+
+    import pytest
+
+    from src import indexer
+
+    repaired = _source_tree(tmp_path, monkeypatch, repaired_pages=2)
+    _fake_chunks(monkeypatch, calls := [])
+    for report in (
+        {},
+        {"book_stem": "other", "pages": 2},
+        {"book_stem": "book", "pages": 3},
+    ):
+        (repaired / "repair_report.json").write_text(json.dumps(report))
+        with pytest.raises(ValueError, match="does not describe"):
+            indexer.index_book("book", source="repaired", root=tmp_path / "store")
     assert calls == []
 
 

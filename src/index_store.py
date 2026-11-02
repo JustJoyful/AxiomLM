@@ -297,12 +297,12 @@ def build_index_version(
             write_bm25(path, chunks)
             validate_pair(collection, path, [c.chunk_id for c in chunks])
         books[book_stem] = {
+            **(provenance or {}),
             "version_id": version,
             "collection": name,
             "query_policy": config.PHASE2_QUERY_POLICY,
             "embedding_signature": signature,
             "config": embedding_config(),
-            **(provenance or {}),
         }
         activate(root, books)
     return resolve_index(book_stem, root=root)

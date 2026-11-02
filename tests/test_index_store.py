@@ -17,6 +17,14 @@ def chunks(text="one"):
     ]
 
 
+def test_provenance_cannot_override_core_manifest_keys(tmp_path):
+    handle = store.build_index_version(
+        "book", chunks(), root=tmp_path, provenance={"version_id": "x", "source": "s"}
+    )
+    entry = store.read_manifest(tmp_path)["book"]
+    assert entry["version_id"] == handle.version_id and entry["source"] == "s"
+
+
 def test_rebuild_identity_pair_ids_and_legacy_stay_available(tmp_path):
     client = store.client_for(tmp_path)
     legacy = client.create_collection("book", embedding_function=None)

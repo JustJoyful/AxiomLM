@@ -512,6 +512,14 @@ def _index_source(
         raise ValueError(
             f"Repaired page files for '{book_stem}' do not match its checkpoints"
         )
+    # shortcut: the report has no per-page hashes, so later page edits go unseen.
+    content = json.loads(report.read_text())
+    if content.get("book_stem") != book_stem or content.get("pages") != len(
+        pages(folder)
+    ):
+        raise ValueError(
+            f"repair_report.json for '{book_stem}' does not describe its repaired pages"
+        )
     digest = hashlib.sha256(report.read_bytes()).hexdigest()
     return folder, {"source": "repaired", "repair_report_sha256": digest}
 
