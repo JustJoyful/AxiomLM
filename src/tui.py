@@ -1103,8 +1103,34 @@ class AxiomLMApp(App):
                     self._transport_closed[request_id].set()
                 if not saw_done:
                     raise RuntimeError("Ollama stream ended before completion")
+                if data.get("done_reason") == "length":
+                    record.citation_status = "skipped"
+                    record.citation_reason = "incomplete"
+                    raise RuntimeError(
+                        "Answer reached the output limit and is incomplete"
+                    )
+                if config.CITATION_CHECK_ENABLED:
+                    from types import SimpleNamespace
+
+                    from src.tools.local import evidence_for
+
+                    refs = [
+                        evidence_for(
+                            SimpleNamespace(
+                                chunk_id=m.get("chunk_id", str(i)),
+                                text=m.get("evidence_text", ""),
+                                metadata=m,
+                            ),
+                            book,
+                        )
+                        for i, m in enumerate(metadata)
+                    ]
+                    await self._apply_citation_check(record, buffer.raw, refs)
                 terminal_phase = "DONE"
         except asyncio.CancelledError:
+            if config.CITATION_CHECK_ENABLED:
+                record.citation_status = "unchecked"
+                record.citation_reason = "cancelled"
             terminal_phase = "CANCELLED"
             self._cancelled_query_ids.add(request_id)
         except ConnectError:
@@ -1125,7 +1151,9 @@ class AxiomLMApp(App):
             await self._flush_answer(request_id)
             if updater:
                 await updater.stop()
-            record.set_answer(buffer.raw)
+            record.set_answer(
+                record.raw_answer if record.citation_status == "checked" else buffer.raw
+            )
             await view.finalize(terminal_phase)
             if terminal_phase == "DONE":
                 self._completion_view = view
@@ -1275,7 +1303,17 @@ class AxiomLMApp(App):
             sources = []
             for ref in data["sources"]:
                 source = (
-                    SourceRef(book, None, None, None, (), "web", ref.url, ref.title)
+                    SourceRef(
+                        book,
+                        None,
+                        None,
+                        None,
+                        (),
+                        "web",
+                        ref.url,
+                        ref.title,
+                        source_id=ref.source_id,
+                    )
                     if ref.kind == "web"
                     else SourceRef(
                         book,
@@ -1283,6 +1321,7 @@ class AxiomLMApp(App):
                         ref.chapter,
                         ref.section,
                         ref.physical_pages,
+                        source_id=ref.source_id,
                     )
                 )
                 if source not in sources:
@@ -1314,6 +1353,8 @@ class AxiomLMApp(App):
             view.step_line.update("\n".join(record.steps[-3:]) + f"\n↳ {stage} …")
             return None
         if event.kind == "result":
+            if data.get("citations"):
+                record.apply_citations(data["citations"])
             verification = data.get("verification")
             if verification:
                 record.steps.append(f"↳ verification {verification['status']}")
@@ -1324,6 +1365,16 @@ class AxiomLMApp(App):
                 return "✗ answer reached the output limit and is incomplete · /retry"
             return "DONE"
         return f"✗ {data.get('message', 'agent error')} · /retry"
+
+    async def _apply_citation_check(self, record, answer, refs):
+        from src.citation_check import run_check
+
+        try:
+            record.apply_citations(await run_check(answer, refs))
+        except asyncio.CancelledError:
+            record.citation_status = "unchecked"
+            record.citation_reason = "cancelled"
+            raise
 
     async def _cancel_active_query(self):
         request_id = self._active_query_request_id
@@ -1755,6 +1806,7 @@ class AxiomLMApp(App):
                 meta.get("chapter") or meta.get("Header 1"),
                 meta.get("section") or meta.get("Header 2"),
                 physical_pages_for(meta),
+                source_id=meta.get("chunk_id"),
             )
             if source not in sources:
                 sources.append(source)
@@ -2104,6 +2156,7 @@ class AxiomLMApp(App):
             dict(
                 c.metadata,
                 chunk_id=c.chunk_id,
+                evidence_text=c.text,
                 dense_rank=c.dense_rank if c.dense_rank is not None else "—",
                 bm25_rank=c.bm25_rank if c.bm25_rank is not None else "—",
                 dense_distance=(

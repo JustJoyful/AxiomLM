@@ -273,7 +273,7 @@ def test_zero_denominators_are_none():
     assert m["coverage"] is None and m["answerable"] == 0
     assert m["abstention_rate"] is None and m["rejection_rate"] is None
     c = ev.claim_metrics([])
-    assert c["hallucination_rate"] is None and c["citation_accuracy"] is None
+    assert c["scorer_flag_rate"] is None and c["scorer_citation_support_rate"] is None
     r = ev.expected_claim_recall([], [])
     assert r["supported_citation_recall"] is None and r["expected_claims"] == 0
 
@@ -333,10 +333,11 @@ def test_claim_metrics_skip_unjudged_rows():
         citations=[{"supported": True}, {"supported": False}],
     )
     m = ev.claim_metrics([judged, _row("b")])
-    assert (m["checked_claims"], m["unsupported_claims"]) == (3, 1)
-    assert m["hallucination_rate"] == 1 / 3
+    assert (m["checked_claims"], m["flagged_claims"]) == (3, 1)
+    assert m["scorer_flag_rate"] == 1 / 3
+    assert "hallucination_rate" not in m and "citation_accuracy" not in m
     assert (m["checked_citations"], m["supported_citations"]) == (2, 1)
-    assert m["citation_accuracy"] == 0.5
+    assert m["scorer_citation_support_rate"] == 0.5
     assert m["unjudged_rows"] == 1
 
 
@@ -566,7 +567,7 @@ async def test_store_changed_during_run_fails_report(tmp_path, monkeypatch):
 
 def test_unknown_pipeline_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="unknown pipeline"):
-        ev.evaluate("book", split="test", pipeline="gated", output=tmp_path / "o")
+        ev.evaluate("book", split="test", pipeline="unknown", output=tmp_path / "o")
     assert not (tmp_path / "o").exists()
 
 
@@ -579,3 +580,122 @@ def test_phase4_label_set_is_complete(book):
     assert {c["kind"] for c in test} == ev.KINDS
     assert len(labels["cases"]) >= 12
     assert labels["review"]["status"] == "maintainer-reviewed"
+
+
+async def test_baseline_pipeline_disables_gate_and_check(tmp_path, monkeypatch):
+    _eval_setup(tmp_path, monkeypatch)
+    _fake_agent(monkeypatch)
+    monkeypatch.setattr(ev.config, "ENTAILMENT_GATE_ENABLED", True)
+    monkeypatch.setattr(ev.config, "CITATION_CHECK_ENABLED", True)
+
+    @asynccontextmanager
+    async def services(report):
+        assert (
+            not ev.config.ENTAILMENT_GATE_ENABLED
+            and not ev.config.CITATION_CHECK_ENABLED
+        )
+        yield {"client": _Client(), "sandbox": None, "counter": None}
+
+    monkeypatch.setattr(ev, "_services", services)
+    report = await _evaluate_in_thread(
+        split="test", pipeline="baseline", output=tmp_path / "out.json"
+    )
+    assert report["status"] == "complete"
+    assert ev.config.ENTAILMENT_GATE_ENABLED and ev.config.CITATION_CHECK_ENABLED
+
+
+async def test_gated_rows_carry_citation_payload(monkeypatch):
+    from src.agent import AgentEvent
+
+    _fake_agent(monkeypatch)
+
+    async def agent(request, **kwargs):
+        yield AgentEvent(
+            "result",
+            {
+                "answer": "An answer with enough words.",
+                "complete": True,
+                "sources": [_book_ref("s1", [1])],
+                "model_requests": 3,
+                "tool_calls": 1,
+                "citations": {
+                    "status": "checked",
+                    "claims": [{"text": "claim", "supported": True}],
+                    "citations": [],
+                    "supporting_source_ids": ["s1"],
+                    "check_seconds": 0.3,
+                },
+            },
+        )
+
+    monkeypatch.setattr(ev, "run_agent", agent)
+    row = await ev.run_case(
+        _followup_case(), "book", client=_Client(), sandbox=None, counter=None
+    )
+    assert row["citation_status"] == "checked" and row["claims"][0]["supported"]
+    assert row["supporting_source_ids"] == ["s1"] and row["check_seconds"] == 0.3
+
+
+def test_check_timeouts_are_counted():
+    metrics = ev.trust_metrics(
+        [
+            {
+                "citation_status": "unchecked",
+                "check_seconds": 1.0,
+                "scoring_seconds": 0.2,
+            },
+            {
+                "citation_status": "checked",
+                "check_seconds": 0.3,
+                "scoring_seconds": None,
+            },
+        ]
+    )
+    assert metrics["check_timeouts"] == {"k": 1, "n": 2, "rate": 0.5}
+    assert metrics["check_latency"]["p95"] == 1.0
+
+
+async def test_rescore_judges_saved_sources_only(tmp_path, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from src import entailment, retrieval
+
+    _eval_setup(tmp_path, monkeypatch)
+    _fake_agent(monkeypatch)
+    path = tmp_path / "before.json"
+    await _evaluate_in_thread(split="test", pipeline="baseline", output=path)
+    saved = json.loads(path.read_text())
+    for row in saved["rows"]:
+        row["answer"] = "This claim has enough words."
+    path.write_text(json.dumps(saved))
+    seen = []
+
+    def score(pairs):
+        seen.extend(pairs)
+        return [0.9] * len(pairs)
+
+    monkeypatch.setattr(entailment, "get_scorer", lambda: SimpleNamespace(score=score))
+    monkeypatch.setattr(
+        retrieval, "search_book", lambda *a, **kw: pytest.fail("no retrieval")
+    )
+    report = await asyncio.to_thread(
+        ev.rescore, path, output=tmp_path / "rescored.json"
+    )
+    assert report["schema_version"] == 2
+    assert report["metrics"]["claims"]["checked_claims"] == 3
+    assert "hallucination_rate" not in report["metrics"]["claims"]
+    assert "citation_accuracy" not in report["metrics"]["claims"]
+    assert seen == [("text", "This claim has enough words.")] * 3
+    assert (
+        report["judge_note"]
+        == "same model as the gated pipeline; not an independent judge"
+    )
+    with pytest.raises(FileExistsError):
+        ev.rescore(path, output=tmp_path / "rescored.json")
+
+
+def test_rescore_refuses_incomplete_report(tmp_path):
+    path = tmp_path / "incomplete.json"
+    path.write_text(json.dumps({"status": "failed", "rows": []}))
+    with pytest.raises(ValueError, match="incomplete"):
+        ev.rescore(path, output=tmp_path / "out.json")

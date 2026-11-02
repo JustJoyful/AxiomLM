@@ -15,7 +15,7 @@ A terminal study assistant for STEM and computer science textbooks, powered by l
 
 ## Project status
 
-Phases 0 and 1 are accepted on the development host. The command-driven Textual interface passed automated and Kitty/Alacritty checks on Niri/Wayland, including maintainer-reported physical key, drag-selection and readability checks. Phase 2 is provisionally accepted by the maintainer for Phase 3 advancement (2026-10-23). Retrieval regression, bounded-answer completion and attributed claim review remain unresolved and are deferred to the final phase (Phase 6). This is not a measured quality pass. Existing indexes remain in use until explicitly rebuilt. Phase 3 agent tools are implemented (see below); their live model/latency acceptance on the development host is pending. Trust/study features remain planned. OCR/scanned-PDF processing is frozen.
+Phases 0 and 1 are accepted on the development host. The command-driven Textual interface passed automated and Kitty/Alacritty checks on Niri/Wayland, including maintainer-reported physical key, drag-selection and readability checks. Phase 2 is provisionally accepted by the maintainer for Phase 3 advancement (2026-10-23). Retrieval regression, bounded-answer completion and attributed claim review remain unresolved and are deferred to the final phase (Phase 6). This is not a measured quality pass. Existing indexes remain in use until explicitly rebuilt. Phase 3 agent tools are accepted with documented limitations. Phase 4 is [provisionally accepted](docs/phase4-provisional-acceptance.md) for its harness and advisory citation-check plumbing; retrieval gating and live checks remain disabled. The ten-answer, selectively audited review records 7/63 factual errors (11.1%) and 1/2 false-premise rejections; it is not a general quality guarantee. Study features remain planned. OCR/scanned-PDF processing is frozen.
 
 Core inference stays local with no silent cloud API fallback. Once models/dependencies are downloaded, the current book chat path can run offline. Planned web search/fetch are explicit evidence tools and require internet. A separate manually triggered Ask cloud button is optional, last, and outside core routing.
 
@@ -24,7 +24,7 @@ Core inference stays local with no silent cloud API fallback. Once models/depend
 - Command-driven Textual 8.2.6 study stream with live local Ollama output, cancellation and a one-question queue.
 - Per-book ChromaDB collections and Jina asymmetric retrieval embeddings.
 - Legacy indexes remain readable; explicit rebuilds use contextual chunks and versioned dense/BM25 pairs with physical-page spans.
-- Bounded follow-up rewriting, page-aware hybrid retrieval for rebuilt books, and metadata-derived source lists. These lists are retrieved evidence, not verified claim citations.
+- Bounded follow-up rewriting, page-aware hybrid retrieval for rebuilt books, and metadata-derived source lists. Every retrieved source stays listed; experimental CPU entailment verdicts are available offline, with live checks disabled by default.
 - PDF engine selection, parse/index progress and resumable page checkpoints.
 - Seven built-in themes, settings-hidden retrieval controls, native selection, and `/copy` / `/copy code` via explicit clipboard transports.
 
@@ -32,11 +32,13 @@ The configured target is **Qwen3.5-4B Q4_K_M**, using the exact Ollama tag `qwen
 
 ## Screenshots
 
-Historical screenshots of the previous interface; they do not depict the Phase 1 stream.
+Current Textual interface in the built-in Tokyo Night theme, captured directly from the app's renderer.
 
-![Current AxiomLM chat interface](image-2.png)
-![Current AxiomLM study response](image-1.png)
-![Current AxiomLM terminal layout](image.png)
+![AxiomLM home screen with command prompt and keyboard hints](docs/screenshots/tui-home.png)
+
+The study view replays a saved local answer, showing code and retrieved pages. Experimental scorer warnings are disabled by default.
+
+![AxiomLM study conversation with Python code and retrieved sources](docs/screenshots/tui-study.png)
 
 ## Setup and use
 
@@ -82,7 +84,7 @@ While generating, one additional question can queue with its captured book/model
 
 `AXIOM_THEME` overrides the saved selection at startup; presence of `NO_COLOR` forces monochrome. `AXIOM_REDUCE_MOTION=1` or presence of `NO_MOTION` disables decorative motion. Terminal mode retains ANSI palette indexes; contrast depends on the terminal palette. Final Unicode math formatting waits until an active answer selection clears.
 
-`/help` lists commands. `/web on|off|show` grants or revokes per-question permission to retrieve web evidence; it is off by default, is locked while work is pending, and does nothing until a self-hosted SearXNG JSON endpoint is set as `WEB_SEARCH_URL` in `src/config.py`. Web access is retrieval only, never cloud inference. `/thinking show` reports the automatic policy (thinking on for the solve computation step, off for Q&A and for JSON/final turns, where measured thinking exhausted the output caps); it is not user-adjustable in Phase 3. `/export` and citation verification remain unavailable (Phases 5/4). Practice and coverage-gap features remain planned.
+`/help` lists commands. `/web on|off|show` grants or revokes per-question permission to retrieve web evidence; it is off by default, is locked while work is pending, and does nothing until a self-hosted SearXNG JSON endpoint is set as `WEB_SEARCH_URL` in `src/config.py`. Web access is retrieval only, never cloud inference. `/thinking show` reports the automatic policy (thinking on for the solve computation step, off for Q&A and for JSON/final turns, where measured thinking exhausted the output caps); it is not user-adjustable in Phase 3. `/export` remains unavailable (Phase 5). The pinned CPU `cross-encoder/nli-deberta-v3-xsmall` remains available to offline evaluation and explicit experiments. `CITATION_CHECK_ENABLED = False` by default because its flags are too noisy; checks never remove page references or rewrite answers. The retrieval gate stays disabled because it failed calibration acceptance. Practice and coverage-gap features remain planned.
 
 ### Phase 3 agent
 
@@ -121,7 +123,7 @@ Checkpoints are stored in `data/parsed_md/checkpoints/<book_stem>/page_NNNN.md`,
 
 ### Retrieval controls
 
-Use `/settings`, `/k 5` (3–15) and `/d 1.5` (finite, nonnegative) for actual retrieval count and distance filtering. Defaults come from `src/config.py`. The labeled SICP comparison preserved accepted K=8 IDs; configured K=5 increased precision from 0.542 to 0.600 and reduced recall from 0.778 to 0.694 over three labeled answerable cases. Fresh stochastic answers still included unsupported claims and page-1 under-answering. These settings do not provide a quality guarantee. Versioned hybrid retrieval is implemented under Phase 2 evaluation; entailment verification remains Phase 4.
+Use `/settings`, `/k 5` (3–15) and `/d 1.5` (finite, nonnegative) for actual retrieval count and distance filtering. Defaults come from `src/config.py`. The labeled SICP comparison preserved accepted K=8 IDs; configured K=5 increased precision from 0.542 to 0.600 and reduced recall from 0.778 to 0.694 over three labeled answerable cases. Fresh stochastic answers still included unsupported claims and page-1 under-answering. These settings do not provide a quality guarantee. Versioned hybrid retrieval is implemented under Phase 2 evaluation; Phase 4 live claim checking and its retrieval gate are disabled by default. The evaluation harness remains available.
 
 ### Native Python sandbox validation
 
@@ -172,7 +174,7 @@ src/
   ocr_*.py           Frozen extraction engines
   checkpoint.py      Frozen per-page artifacts
   preprocessor.py    Frozen preprocessing
-scripts/             Existing setup and page-validation utilities
+scripts/             Setup, validation and per-book evaluation utilities
 data/                Local parsed artifacts, vector indexes and logs
 PRD.md               Product scope, build order and acceptance gates
 ARCHITECTURE.md      Current baseline and target implementation contracts

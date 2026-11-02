@@ -220,3 +220,33 @@ async def test_web_permission_is_locked_while_busy(app_factory):
         app.queued_query = ("q", "sicp", "m")
         await dispatch_command(app, "/web on")
     assert app.web_enabled is False and "locked" in lines[-1]
+
+
+async def test_default_answer_has_no_scorer_warning_or_rewritten_pages(
+    app_factory, monkeypatch
+):
+    answer = "Environments bind names to values (p. 57)."
+
+    async def events():
+        yield AgentEvent("sources", {"sources": [BOOK_REF]})
+        yield AgentEvent("token", {"text": answer})
+        yield AgentEvent(
+            "result",
+            {
+                "complete": True,
+                "verification": None,
+                "model_requests": 3,
+                "tool_calls": 1,
+            },
+        )
+
+    app = agent_app(app_factory, monkeypatch, events, Client())
+    async with app.run_test():
+        await app.workers.wait_for_complete()
+        await app._submit_question("Explain environments", "sicp", app.selected_model)
+        await wait_idle(app)
+        view = app.turns[-1]
+        assert view.record.copy_text == answer
+        assert not view.record.unsupported and not view.unsupported_line.display
+        assert view.record.citation_status == ""
+        assert len(view.record.sources) == 1

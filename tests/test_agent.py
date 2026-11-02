@@ -1285,3 +1285,86 @@ async def test_later_compute_stages_keep_room_for_verify_and_web(web_enabled, ch
         assert [kind for kind, _ in web.calls] == ["search", "fetch"]
     else:
         assert len(sandbox.verified) == 1
+
+
+async def checked_qa(monkeypatch, *, slow=False, incomplete=False):
+    import time
+    from types import SimpleNamespace
+    from src import entailment
+
+    monkeypatch.setattr(config, "CITATION_CHECK_ENABLED", True)
+    monkeypatch.setattr(config, "CITATION_CHECK_SECONDS", 0.01 if slow else 2.0)
+
+    def score(pairs):
+        if slow:
+            time.sleep(0.08)
+        return [0.9] * len(pairs)
+
+    monkeypatch.setattr(entailment, "get_scorer", lambda: SimpleNamespace(score=score))
+    return await collect(
+        request=AgentRequest("r", "Explain environments", "sicp", config.OLLAMA_MODEL),
+        client=Client(
+            [
+                {"content": '{"mode":"qa"}'},
+                {"content": '{"sufficient":true,"reason":"ok","check":null}'},
+                {
+                    "content": "Environments bind names to values.",
+                    "done_reason": "length" if incomplete else "stop",
+                },
+            ]
+        ),
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("s", "Names have values.", 3)], []),
+    )
+
+
+async def test_result_carries_citation_report(monkeypatch):
+    events, last = await checked_qa(monkeypatch)
+    assert last.data["citations"]["status"] == "checked"
+    assert last.data["citations"]["supporting_source_ids"] == ["s"]
+    assert last.data["citations"]["claims"][0]["supported"]
+    assert any(e.kind == "step" and e.data["stage"] == "citation_check" for e in events)
+
+
+async def test_check_respects_time_budget(monkeypatch):
+    _, last = await checked_qa(monkeypatch, slow=True)
+    assert last.data["citations"]["status"] == "unchecked"
+    assert last.data["citations"]["reason"] == "time budget"
+    assert last.data["answer"] == "Environments bind names to values."
+
+
+async def test_check_does_not_charge_tool_cap(monkeypatch):
+    monkeypatch.setattr(config, "AGENT_MAX_TOOL_CALLS", 1)
+    _, last = await checked_qa(monkeypatch)
+    assert last.data["tool_calls"] == 1 and last.data["model_requests"] == 3
+    assert last.data["citations"]["status"] == "checked"
+
+
+async def test_incomplete_answer_skips_check(monkeypatch):
+    _, last = await checked_qa(monkeypatch, incomplete=True)
+    assert last.data["citations"] == {"status": "skipped", "reason": "incomplete"}
+
+
+async def test_disabled_citation_check_preserves_answer_without_loading(monkeypatch):
+    from src import entailment
+
+    monkeypatch.setattr(config, "CITATION_CHECK_ENABLED", False)
+    monkeypatch.setattr(
+        entailment, "get_scorer", lambda: pytest.fail("live checker must stay off")
+    )
+    answer = "Environments bind names to values (p. 57)."
+    _, last = await collect(
+        request=AgentRequest("r", "Explain environments", "sicp", config.OLLAMA_MODEL),
+        client=Client(
+            [
+                {"content": '{"mode":"qa"}'},
+                {"content": '{"sufficient":true,"reason":"ok","check":null}'},
+                {"content": answer},
+            ]
+        ),
+        sandbox=Sandbox(),
+        counter=Counter(),
+        search=search_with([Candidate("s", "Names have values.", 58)], []),
+    )
+    assert last.data["answer"] == answer and "citations" not in last.data

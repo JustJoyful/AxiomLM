@@ -143,3 +143,49 @@ def test_scorer_stays_on_cpu_when_cuda_exists(monkeypatch):
     scorer = entailment.get_scorer()
     assert seen == {"download": ("org/nli", "a" * 40), "load": ("/snapshot", "cpu")}
     assert entailment.get_scorer() is scorer
+
+
+def test_configured_scorer_is_pinned():
+    import re
+
+    assert re.fullmatch(r"[0-9a-f]{40}", config.ENTAILMENT_REVISION)
+    assert config.ENTAILMENT_FORMULATION in FORMULATIONS
+    assert 0 < config.ENTAILMENT_GATE_THRESHOLD < 1
+    assert 0 < config.ENTAILMENT_CLAIM_THRESHOLD < 1
+
+
+def test_indivisible_premise_windows_fit_and_find_suffix_support():
+    class CharacterTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            return list(text)
+
+    premise = "变量" * 42 + "SUPPORT"
+    tokenizer = CharacterTokenizer()
+    windows = premise_windows(premise, "h", tokenizer, max_length=16)
+    assert "".join(windows) == premise
+    assert all(len(tokenizer.encode(window)) + 1 + 3 <= 16 for window in windows)
+    model = FakeModel(
+        max_length=16,
+        rows=lambda pairs: [
+            [0.0, 0.9 if "SUPPORT" in text else 0.1, 0.0] for text, _ in pairs
+        ],
+    )
+    model.tokenizer = tokenizer
+    assert Scorer("m", "r", model=model).score([(premise, "h")]) == [0.9]
+
+
+def test_live_citation_check_is_disabled_by_default():
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from src.config import CITATION_CHECK_ENABLED; print(CITATION_CHECK_ENABLED)",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "False"

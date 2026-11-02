@@ -15,7 +15,7 @@ import shutil
 import sys
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -51,9 +51,12 @@ KINDS = frozenset(
     }
 )
 SPLITS = ("calibration", "test")
-PIPELINES: tuple[str, ...] = ("baseline",)
+PIPELINES: tuple[str, ...] = ("baseline", "gated")
 CODE = (
     "src/agent.py",
+    "src/entailment.py",
+    "src/citation_check.py",
+    "src/config.py",
     "src/retrieval.py",
     "src/hybrid_retrieval.py",
     "src/query_rewriting.py",
@@ -222,20 +225,21 @@ def answer_metrics(cases: list[dict], rows: list[dict]) -> dict:
 
 
 def claim_metrics(rows: list[dict]) -> dict:
+    """Scorer votes only; factual error/accuracy requires independent human review."""
     judged = [r for r in rows if "claims" in r]
     claims = [c for r in judged for c in r["claims"]]
     citations = [c for r in judged for c in r.get("citations", [])]
-    unsupported = sum(not c["supported"] for c in claims)
+    flagged = sum(not c["supported"] for c in claims)
     supported = sum(c["supported"] for c in citations)
     return {
         "judged_rows": len(judged),
         "unjudged_rows": len(rows) - len(judged),
         "checked_claims": len(claims),
-        "unsupported_claims": unsupported,
-        "hallucination_rate": _rate(unsupported, len(claims)),
+        "flagged_claims": flagged,
+        "scorer_flag_rate": _rate(flagged, len(claims)),
         "checked_citations": len(citations),
         "supported_citations": supported,
-        "citation_accuracy": _rate(supported, len(citations)),
+        "scorer_citation_support_rate": _rate(supported, len(citations)),
     }
 
 
@@ -301,6 +305,18 @@ async def run_case(case: dict, book: str, *, client, sandbox, counter) -> dict:
         "tool_calls": None,
         "error": None,
     }
+    from src.retrieval import search_book
+
+    def search(*args, **kwargs):
+        found = search_book(*args, **kwargs)
+        row.update(
+            candidate_ids=[c.chunk_id for c in found.candidates],
+            gated=found.gated,
+            dropped=found.dropped,
+            scoring_seconds=found.scoring_seconds,
+        )
+        return found
+
     started = time.monotonic()
     try:
         try:
@@ -324,14 +340,22 @@ async def run_case(case: dict, book: str, *, client, sandbox, counter) -> dict:
                 today=datetime.now().astimezone().date().isoformat(),
             )
             async for event in run_agent(
-                request, client=client, sandbox=sandbox, counter=counter, web=None
+                request,
+                client=client,
+                sandbox=sandbox,
+                counter=counter,
+                web=None,
+                search=search,
             ):
                 if event.kind == "step":
                     row["stage_seconds"][event.data["stage"]] = (
                         time.monotonic() - started
                     )
                 elif event.kind == "sources":
-                    row["candidate_ids"] = [s.source_id for s in event.data["sources"]]
+                    if not row["candidate_ids"]:
+                        row["candidate_ids"] = [
+                            s.source_id for s in event.data["sources"]
+                        ]
                 elif event.kind == "result":
                     data = event.data
                     row.update(
@@ -351,6 +375,21 @@ async def run_case(case: dict, book: str, *, client, sandbox, counter) -> dict:
                         model_requests=data["model_requests"],
                         tool_calls=data["tool_calls"],
                     )
+                    if data.get("citations"):
+                        payload = data["citations"]
+                        row.update(
+                            citation_status=payload["status"],
+                            check_seconds=payload.get("check_seconds"),
+                        )
+                        for key in (
+                            "claims",
+                            "citations",
+                            "supporting_source_ids",
+                            "unchecked",
+                            "reason",
+                        ):
+                            if key in payload:
+                                row[key] = payload[key]
                 elif event.kind == "error":
                     kind = event.data.get("kind", "error")
                     row["error"] = f"Agent{kind.title()}: {event.data['message']}"
@@ -404,9 +443,17 @@ async def _evaluate(report: dict, cases: list[dict], book: str, store: Path) -> 
     from src import index_store
 
     resolve = index_store.resolve_index
-    with patch.object(
-        index_store, "resolve_index", lambda stem, **_: resolve(stem, root=store)
-    ):
+    with ExitStack() as stack:
+        if report["pipeline"] == "baseline":
+            stack.enter_context(patch.object(config, "ENTAILMENT_GATE_ENABLED", False))
+            stack.enter_context(patch.object(config, "CITATION_CHECK_ENABLED", False))
+        stack.enter_context(
+            patch.object(
+                index_store,
+                "resolve_index",
+                lambda stem, **_: resolve(stem, root=store),
+            )
+        )
         handle = index_store.resolve_index(book)
         entry = index_store.read_manifest(store).get(book)
         report["index_version"] = {
@@ -439,7 +486,7 @@ def evaluate(
     path = labels_path(book)
     stream = reserve(output)
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "phase4_eval",
         "status": "running",
         "started_utc": datetime.now(UTC).isoformat(),
@@ -471,6 +518,15 @@ def evaluate(
             report["case_subset"] = case_ids
         report["sampling"] = sampling_record()
         report.update(identities(CODE))
+        report["trust_config"] = {
+            "gate_enabled": (
+                config.ENTAILMENT_GATE_ENABLED if pipeline == "gated" else False
+            ),
+            "check_enabled": (
+                config.CITATION_CHECK_ENABLED if pipeline == "gated" else False
+            ),
+            **judge_identity(),
+        }
         with tempfile.TemporaryDirectory(prefix="axiom-phase4-eval-") as temp:
             store = Path(temp) / "vector_store"
             shutil.copytree(config.VECTOR_STORE, store)
@@ -483,6 +539,9 @@ def evaluate(
             "retrieval": retrieval_metrics(cases, rows),
             "answer": answer_metrics(cases, rows),
             "latency": latency_metrics(rows),
+            **trust_metrics(rows),
+            "claims": claim_metrics(rows),
+            "expected_claim_recall": expected_claim_recall(cases, rows),
         }
         report["status"] = "complete"
     except BaseException as exc:
@@ -500,14 +559,127 @@ def evaluate(
     return report
 
 
+def trust_metrics(rows):
+    def latency(key):
+        values = [r[key] for r in rows if r.get(key) is not None]
+        return {
+            "n": len(values),
+            "p50": _percentile(values, 0.5),
+            "p95": _percentile(values, 0.95),
+        }
+
+    timed_out = sum(r.get("citation_status") == "unchecked" for r in rows)
+    return {
+        "scoring_latency": latency("scoring_seconds"),
+        "check_latency": latency("check_seconds"),
+        "check_timeouts": {
+            "k": timed_out,
+            "n": len(rows),
+            "rate": _rate(timed_out, len(rows)),
+        },
+    }
+
+
+def judge_identity():
+    return {
+        "model": config.ENTAILMENT_MODEL,
+        "revision": config.ENTAILMENT_REVISION,
+        "formulation": config.ENTAILMENT_FORMULATION,
+        "claim_threshold": config.ENTAILMENT_CLAIM_THRESHOLD,
+    }
+
+
+def rescore(report: Path, *, output: Path) -> dict:
+    from src.citation_check import check_answer, report_payload
+    from src.entailment import get_scorer
+    from src.tools.protocol import EvidenceRef
+
+    if output.exists():
+        raise FileExistsError(output)
+    saved = json.loads(Path(report).read_text())
+    if (
+        saved.get("status") != "complete"
+        or not saved.get("rows")
+        or any(not r.get("complete") or r.get("error") for r in saved["rows"])
+    ):
+        raise ValueError("Cannot rescore incomplete report")
+    path = Path(saved["labels_path"])
+    if digest(path) != saved["labels_sha256"]:
+        raise ValueError("Labels changed since saved report")
+    labels = load_labels(path, pages_root=config.REPAIRED_MD)
+    cases = cases_for(labels, saved["split"])
+    if saved.get("case_subset"):
+        cases = [c for c in cases if c["case_id"] in saved["case_subset"]]
+    if {c["case_id"] for c in cases} != {r["case_id"] for r in saved["rows"]}:
+        raise ValueError("Cannot rescore incomplete case coverage")
+    stream = reserve(output)
+    try:
+        scorer = get_scorer()
+        for row in saved["rows"]:
+            sources = [
+                EvidenceRef(
+                    s["source_id"],
+                    s["kind"],
+                    s["text"],
+                    physical_pages=tuple(s["pages"]),
+                )
+                for s in row["sources"]
+            ]
+            started = time.monotonic()
+            payload = report_payload(check_answer(row["answer"], sources, scorer.score))
+            row.update(
+                {
+                    k: payload[k]
+                    for k in (
+                        "claims",
+                        "citations",
+                        "supporting_source_ids",
+                        "unchecked",
+                    )
+                }
+            )
+            row.update(
+                citation_status=payload["status"],
+                check_seconds=time.monotonic() - started,
+            )
+        saved.update(
+            schema_version=2,
+            judge=judge_identity(),
+            judge_note="same model as the gated pipeline; not an independent judge",
+            rescored_from=str(report),
+            rescored_from_sha256=digest(report),
+            rescored_utc=datetime.now(UTC).isoformat(),
+        )
+        saved["metrics"].update(
+            claims=claim_metrics(saved["rows"]),
+            expected_claim_recall=expected_claim_recall(cases, saved["rows"]),
+            **trust_metrics(saved["rows"]),
+        )
+    except BaseException as exc:
+        saved.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    finally:
+        finish(stream, saved)
+    return saved
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("book")
-    parser.add_argument("--split", choices=SPLITS, required=True)
-    parser.add_argument("--pipeline", choices=PIPELINES, required=True)
+    parser.add_argument("book", nargs="?")
+    parser.add_argument("--rescore", type=Path)
+    parser.add_argument("--split", choices=SPLITS)
+    parser.add_argument("--pipeline", choices=PIPELINES)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cases", nargs="+", help="only these case ids")
     args = parser.parse_args(argv)
+    if args.rescore:
+        report = rescore(args.rescore, output=args.output)
+        print(json.dumps({"status": report["status"]}))
+        return 0
+    if not args.book or not args.split or not args.pipeline:
+        parser.error(
+            "book, --split and --pipeline are required unless --rescore is used"
+        )
     report = evaluate(
         args.book,
         split=args.split,

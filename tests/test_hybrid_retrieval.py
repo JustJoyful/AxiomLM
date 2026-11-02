@@ -203,3 +203,44 @@ def test_overview_search_and_answer_keep_original_wording(tmp_path, monkeypatch)
 )
 def test_overview_intent_does_not_erase_qualifiers_or_page_requests(question):
     assert not hybrid.is_book_overview(question)
+
+
+def test_gate_drops_below_threshold_and_ranks_by_score():
+    candidates = hybrid.merge_ranked_candidates(
+        [hit(c, "dense", i) for i, c in enumerate("abc")], []
+    )
+    rows, dropped = hybrid.gate_and_rank(
+        "claim", candidates, lambda pairs: [0.2, 0.9, 0.6], 0.5
+    )
+    assert [c.chunk_id for c in rows] == ["b", "c"]
+    assert dropped == 1 and rows[0].entailment == 0.9
+
+
+def test_gate_breaks_ties_by_chunk_id():
+    candidates = hybrid.merge_ranked_candidates(
+        [hit("z", "dense", 0), hit("a", "dense", 1)], []
+    )
+    rows, _ = hybrid.gate_and_rank("claim", candidates, lambda pairs: [0.9, 0.9], 0.5)
+    assert [c.chunk_id for c in rows] == ["a", "z"]
+
+
+def test_gate_scores_in_one_call():
+    candidates = hybrid.merge_ranked_candidates(
+        [hit(str(i), "dense", i) for i in range(15)], []
+    )
+    calls = []
+
+    def score(pairs):
+        calls.append(pairs)
+        return [0.0] * len(pairs)
+
+    assert hybrid.gate_and_rank("claim", candidates, score, 0.5) == ([], 15)
+    assert calls == [[(c.text, "claim") for c in candidates]]
+
+
+def test_all_dropped_returns_empty_not_original():
+    candidates = hybrid.merge_ranked_candidates([hit("a", "dense")], [])
+    assert hybrid.gate_and_rank("claim", candidates, lambda pairs: [0.1], 0.5) == (
+        [],
+        1,
+    )

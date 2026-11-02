@@ -65,3 +65,5 @@ Screen:nocolor .failed { text-style: reverse; }
 .home #stream_spacer { display: none; }
 #chat_scroll, #overlay { scrollbar-size-vertical: 0; }
 QueryComposer { scrollbar-size-vertical: 0; }
+
+.unsupported { color: $warning; height: auto; margin-top: 1; }

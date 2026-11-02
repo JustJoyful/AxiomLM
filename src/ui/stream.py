@@ -1,7 +1,7 @@
 """Turn state and a single selectable scrolling study surface."""
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
@@ -22,6 +22,8 @@ class SourceRef:
     kind: str = "book"
     url: str | None = None
     title: str | None = None
+    supports_claim: bool | None = None
+    source_id: str | None = None
 
     def label(self):
         if self.kind == "web":
@@ -56,6 +58,9 @@ class TurnRecord:
     phase: str = "SUBMITTED"
     steps: list[str] = field(default_factory=list)
     retrieval_query: str = ""
+    unsupported: list[str] = field(default_factory=list)
+    citation_status: str = ""
+    citation_reason: str = ""
 
     def set_answer(self, raw):
         self.raw_answer = raw
@@ -63,10 +68,45 @@ class TurnRecord:
         self.copy_is_sanitized = self.copy_text != raw
         self.display_answer = normalize_math(self.copy_text)
 
+    def apply_citations(self, payload):
+        self.citation_status = payload["status"]
+        self.citation_reason = payload.get("reason", "")
+        self.unsupported = [
+            c["text"] for c in payload.get("claims", []) if not c["supported"]
+        ]
+        if self.citation_status == "checked":
+            self.set_answer(payload.get("answer", self.raw_answer))
+            keep = set(payload.get("supporting_source_ids", []))
+            claims = payload.get("claims", [])
+            self.sources = [
+                replace(s, supports_claim=(s.source_id in keep) if claims else None)
+                for s in self.sources
+            ]
+            self.steps.append(
+                f"↳ citations {sum(c['supported'] for c in claims)}/{len(claims)} claims supported · {sum(s.supports_claim is True for s in self.sources)}/{len(self.sources)} sources support a claim"
+            )
+            if payload.get("unchecked"):
+                self.steps.append(
+                    f"↳ {payload['unchecked']} additional claims not checked"
+                )
+
+    def citation_notice(self):
+        if self.unsupported:
+            return "Not supported by the retrieved evidence\n" + "\n".join(
+                "- " + text for text in self.unsupported
+            )
+        if self.citation_status and self.citation_status != "checked":
+            return (
+                f"Citations not checked: {self.citation_reason or self.citation_status}"
+            )
+        return ""
+
     def copy_payload(self):
         return (
-            "[AxiomLM sanitized answer]\n" if self.copy_is_sanitized else ""
-        ) + self.copy_text
+            ("[AxiomLM sanitized answer]\n" if self.copy_is_sanitized else "")
+            + self.copy_text
+            + ("\n\n" + self.citation_notice() if self.citation_notice() else "")
+        )
 
 
 class TurnView(Vertical):
@@ -79,6 +119,8 @@ class TurnView(Vertical):
         self.answer = StudyMarkdown(
             record.display_answer, classes="answer", open_links=False
         )
+        self.unsupported_line = Static("", classes="unsupported", markup=False)
+        self.unsupported_line.display = False
         self.source_line = Static("", classes="citation", markup=False)
         self.source_line.display = bool(record.sources)
         self.started_at = time.monotonic()
@@ -92,6 +134,7 @@ class TurnView(Vertical):
         yield self.question
         yield self.step_line
         yield self.answer
+        yield self.unsupported_line
         yield self.source_line
         yield self.detail_line
         yield self.tail
@@ -102,6 +145,7 @@ class TurnView(Vertical):
             "retrieved evidence · not verified claim citations\n"
             + "\n".join(
                 f"[{i}] {source.label()}"
+                + (" · supports a claim" if source.supports_claim else "")
                 for i, source in enumerate(self.record.sources, 1)
             )
         )
@@ -114,6 +158,8 @@ class TurnView(Vertical):
         )
 
     async def finalize(self, phase="DONE"):
+        self.unsupported_line.update(self.record.citation_notice())
+        self.unsupported_line.display = bool(self.record.citation_notice())
         self.record.phase = phase
         self.tail.display = False
         self._format_pending = self.answer.source != self.record.display_answer

@@ -71,6 +71,8 @@ async def search_local_index(
         "page_fallback": found.page_fallback,
         "index_version": found.index_version,
         "legacy_index": found.legacy,
+        "gated": found.gated,
+        "dropped": found.dropped,
     }
     # Whole passages only: an item that does not fit is omitted, never cut.
     budget = config.TOOL_MAX_RESULT_BYTES - len(json.dumps(base).encode()) - 256

@@ -63,3 +63,50 @@ def test_empty_retrieval_still_traces_actual_query(monkeypatch):
     patch(monkeypatch, [[]])
     found = search_book("nothing here", book_stem="sicp", distance=1.5)
     assert found.candidates == () and found.retrieval_query == "nothing here"
+
+
+def test_page_and_overview_queries_skip_gate(monkeypatch):
+    monkeypatch.setattr(config, "ENTAILMENT_GATE_ENABLED", True)
+    for question in ("explain page 12", "What is this book about?"):
+        patch(monkeypatch, [["c"]])
+        found = search_book(question, book_stem="sicp", distance=1.5)
+        assert not found.gated and found.candidates == ("c",)
+
+
+def test_gate_disabled_keeps_phase2_order(monkeypatch):
+    patch(monkeypatch, [["z", "a"]])
+    found = search_book("streams", book_stem="sicp", distance=1.5)
+    assert not found.gated and found.dropped == 0 and found.candidates == ("z", "a")
+
+
+def test_scorer_load_failure_is_visible(monkeypatch):
+    import pytest
+    from src import entailment
+
+    patch(monkeypatch, [["c"]])
+    monkeypatch.setattr(config, "ENTAILMENT_GATE_ENABLED", True)
+
+    def fail():
+        raise OSError("missing offline files")
+
+    monkeypatch.setattr(entailment, "get_scorer", fail)
+    with pytest.raises(
+        RuntimeError, match="Entailment scorer unavailable: missing offline files"
+    ):
+        search_book("streams", book_stem="sicp", distance=1.5)
+
+
+async def test_search_tool_reports_gate_counts(monkeypatch):
+    from src.retrieval import BookSearchResult
+    from src.tools.local import search_local_index
+    from src.tools.protocol import ToolContext
+
+    result = await search_local_index(
+        {"query": "streams"},
+        ToolContext("r", "sicp", "m", False, "local"),
+        call_id="c",
+        search=lambda *a, **kw: BookSearchResult(
+            (), False, "v", False, "streams", False, None, True, 15, 0.1
+        ),
+    )
+    assert result.data["gated"] and result.data["dropped"] == 15

@@ -7,6 +7,7 @@ module only gives the agent and the TUI one shared, testable boundary.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from src import config
@@ -22,6 +23,9 @@ class BookSearchResult:
     retrieval_query: str
     overview: bool
     page_filter: tuple[int, int] | None
+    gated: bool = False
+    dropped: int = 0
+    scoring_seconds: float | None = None
 
 
 def search_book(
@@ -60,6 +64,28 @@ def search_book(
     fallback = bool(page_range and not candidates)
     if fallback:
         candidates = retrieve(None)
+    gated = (
+        config.ENTAILMENT_GATE_ENABLED
+        and page_range is None
+        and not overview
+        and not fallback
+    )
+    dropped, scoring_seconds = 0, None
+    if gated:
+        from src.entailment import get_scorer, hypothesis_for
+
+        started = time.monotonic()
+        try:
+            scorer = get_scorer()
+            candidates, dropped = hybrid_retrieval.gate_and_rank(
+                hypothesis_for(effective),
+                candidates,
+                scorer.score,
+                config.ENTAILMENT_GATE_THRESHOLD,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Entailment scorer unavailable: {exc}") from exc
+        scoring_seconds = time.monotonic() - started
     return BookSearchResult(
         tuple(candidates),
         fallback,
@@ -68,4 +94,7 @@ def search_book(
         effective,
         overview,
         page_range,
+        gated,
+        dropped,
+        scoring_seconds,
     )

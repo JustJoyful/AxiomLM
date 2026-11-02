@@ -38,8 +38,23 @@ def hypothesis_for(
 
 def _spans(text: str, start: int, end: int, level: int, fits) -> list[tuple[int, int]]:
     """Split text[start:end] at the coarsest boundary whose parts fit."""
-    if fits(text[start:end]) or level == len(_SPLITS):
+    if fits(text[start:end]):
         return [(start, end)]
+    if level == len(_SPLITS):
+        spans = []
+        while start < end:
+            low, high, stop = start + 1, end, start
+            while low <= high:
+                middle = (low + high) // 2
+                if fits(text[start:middle]):
+                    stop, low = middle, middle + 1
+                else:
+                    high = middle - 1
+            if stop == start:
+                raise ValueError("A premise character exceeds the token budget")
+            spans.append((start, stop))
+            start = stop
+        return spans
     spans = []
     cursor = start
     for match in _SPLITS[level].finditer(text, start, end):

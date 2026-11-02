@@ -1,0 +1,2 @@
+# Textual SVG snapshots retain generator-owned whitespace.
+tests/tui/__snapshots__/**/*.svg -whitespace

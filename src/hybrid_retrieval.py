@@ -7,7 +7,7 @@ import math
 import re
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import zip_longest
 
 from src import config, db
@@ -34,6 +34,19 @@ class MergedCandidate:
     bm25_rank: int | None
     dense_distance: float | None
     bm25_score: float | None
+    entailment: float | None = None
+
+
+def gate_and_rank(hypothesis, candidates, score, threshold):
+    scores = score([(candidate.text, hypothesis) for candidate in candidates])
+    ranked = []
+    for candidate, value in zip(candidates, scores, strict=True):
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError("Invalid entailment probability")
+        if value >= threshold:
+            ranked.append(replace(candidate, entailment=value))
+    ranked.sort(key=lambda candidate: (-candidate.entailment, candidate.chunk_id))
+    return ranked, len(candidates) - len(ranked)
 
 
 def merge_ranked_candidates(

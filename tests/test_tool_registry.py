@@ -71,7 +71,7 @@ async def test_later_phase_tools_are_unavailable_not_simulated():
         "c2", "verify_citation", {"claim": "x", "source_id": "s"}, context()
     )
     assert pdf.status == cite.status == "unavailable"
-    assert "Phase 5" in pdf.data["error"] and "Phase 4" in cite.data["error"]
+    assert "Phase 5" in pdf.data["error"] and "evidence" in cite.data["error"].lower()
 
 
 async def test_invalid_and_stage_illegal_calls_never_reach_handlers():
@@ -184,3 +184,40 @@ def test_tool_message_quotes_status_and_data():
 
     text = tool_message(ToolResult("c", "web_search", "denied", {"error": "off"}))
     assert '"status":"denied"' in text and '"tool":"web_search"' in text
+
+
+async def test_verify_citation_supported(monkeypatch):
+    from types import SimpleNamespace
+    from src import entailment
+    from src.tools.protocol import EvidenceRef
+
+    monkeypatch.setattr(
+        entailment, "get_scorer", lambda: SimpleNamespace(score=lambda pairs: [0.9])
+    )
+    registry = ToolRegistry(evidence=lambda sid: EvidenceRef(sid, "book", "evidence"))
+    result = await registry.dispatch(
+        "c",
+        "verify_citation",
+        {"claim": "supported claim", "source_id": "s"},
+        context(),
+    )
+    assert (
+        result.status == "ok"
+        and result.data["supported"]
+        and result.data["score"] == 0.9
+    )
+
+
+async def test_verify_citation_unknown_source_is_error():
+    registry = ToolRegistry(evidence=lambda sid: None)
+    result = await registry.dispatch(
+        "c", "verify_citation", {"claim": "claim", "source_id": "missing"}, context()
+    )
+    assert result.status == "error"
+
+
+async def test_verify_citation_without_evidence_is_unavailable():
+    result = await ToolRegistry().dispatch(
+        "c", "verify_citation", {"claim": "claim", "source_id": "s"}, context()
+    )
+    assert result.status == "unavailable" and "evidence" in result.data["error"].lower()
