@@ -104,9 +104,12 @@ async def test_repeated_cancel_during_unload_keeps_cleanup_owner(
 async def test_unavailable_export_needs_no_ollama_cleanup(
     app_factory, monkeypatch, tmp_path
 ):
-    from src import documents
+    from src import documents, typst_compile
 
     app = app_factory()
+    monkeypatch.setattr(
+        typst_compile, "compiler_capability", lambda: (False, "missing")
+    )
     monkeypatch.setattr(documents, "compiler_capability", lambda: (False, "missing"))
     monkeypatch.setattr(documents.config, "EXPORT_DIR", tmp_path)
 

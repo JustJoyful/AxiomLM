@@ -739,7 +739,7 @@ class AxiomLMApp(App):
             or self._is_parsing
             or self._copy_confirmation is not None
             or time.monotonic() < self._completion_flash_until
-        )
+        ) and bool(self.query("#header"))
 
     def on_app_focus(self):
         self._terminal_focused = True

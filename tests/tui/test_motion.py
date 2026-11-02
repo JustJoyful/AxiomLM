@@ -101,3 +101,15 @@ def test_shimmer_and_blink_use_shared_deadlines(monkeypatch):
     assert clock.blink(0.49)
     assert not clock.blink(0.5)
     assert clock.blink(1)
+
+
+async def test_late_motion_tick_stops_after_header_unmount(app_factory):
+    import time
+
+    app = app_factory()
+    async with app.run_test():
+        app._completion_flash_until = time.monotonic() + 10
+        app.motion.start()
+        await app.query_one("#header").remove()
+        app.motion.tick(time.monotonic())
+        assert not app.motion.running
