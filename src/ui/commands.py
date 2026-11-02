@@ -39,6 +39,13 @@ COMMANDS = {
         ("/sources", "[n]", "Expand retrieved evidence", 1),
         ("/details", "[n]", "Expand pipeline steps", 1),
         ("/copy", "[n] | code [n]", "Copy answer or fenced code", 1),
+        (
+            "/practice",
+            "[section-number] [count]",
+            "List sections or generate practice",
+            5,
+        ),
+        ("/coverage", "", "Show study coverage", 5),
         ("/export", "[n]", "Typeset to PDF", 5),
         ("/retry", "", "Retry the last question", 1),
         ("/clear", "", "Clear displayed history", 1),

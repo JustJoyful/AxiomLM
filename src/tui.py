@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import Callable
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock, Thread
@@ -178,6 +179,8 @@ class AxiomLMApp(App):
         self._last_answer_flush = float("-inf")
         self._answer_flush_worker = None
         self._pending_assistants = {}
+        self._feature_worker = None
+        self._feature_cleaning = False
         self._active_query_worker = None
         self._active_query_request_id = None
         self._cancelled_query_ids = set()
@@ -201,6 +204,10 @@ class AxiomLMApp(App):
         self._agent_routing = config.AGENT_ROUTING_ENABLED
         self._request_web = {}
         self._sandbox = None
+        from .study_state import StudyStore
+
+        self._study_session_id = uuid4().hex
+        self._study_store = StudyStore()
         self.turns = []
         self.notices = []
         self._home_visible = True
@@ -400,6 +407,11 @@ class AxiomLMApp(App):
     def _busy(self):
         return (
             self._workload_coordinator.active_kind is not None
+            or (
+                self._feature_worker is not None
+                and not self._feature_worker.is_finished
+                and not self._feature_worker.is_cancelled
+            )
             or self._deleting
             or self.queued_query is not None
         )
@@ -1047,6 +1059,8 @@ class AxiomLMApp(App):
                     )
                 )
                 prompt, metadata, pages, _ids = await asyncio.shield(retrieval)
+                versions = {meta.get("index_version") for meta in metadata}
+                record.index_version = versions.pop() if len(versions) == 1 else None
                 if metadata:
                     record.retrieval_query = metadata[0].get(
                         "retrieval_query", rewritten.retrieval_query
@@ -1155,6 +1169,8 @@ class AxiomLMApp(App):
                 record.raw_answer if record.citation_status == "checked" else buffer.raw
             )
             await view.finalize(terminal_phase)
+            if terminal_phase == "DONE":
+                await self._record_study_observation(record)
             if terminal_phase == "DONE":
                 self._completion_view = view
                 self._completion_text = f"✓ {len(record.steps)} steps · {time.monotonic()-started:.1f}s · /details"
@@ -1353,6 +1369,12 @@ class AxiomLMApp(App):
             view.step_line.update("\n".join(record.steps[-3:]) + f"\n↳ {stage} …")
             return None
         if event.kind == "result":
+            versions = {
+                row.get("index_version")
+                for row in data.get("trace", [])
+                if row.get("tool") == "search_local_index" and row.get("status") == "ok"
+            }
+            record.index_version = versions.pop() if len(versions) == 1 else None
             if data.get("citations"):
                 record.apply_citations(data["citations"])
             verification = data.get("verification")
@@ -1440,6 +1462,22 @@ class AxiomLMApp(App):
                         else ""
                     )
                 )
+            return
+        if name in {"/practice", "/coverage"}:
+            await self._study_command(name, arguments)
+            return
+        if name == "/export":
+            if self._busy():
+                await self.write_line("○ work is active · /cancel or wait")
+                return
+            try:
+                if len(arguments) > 1:
+                    raise ValueError("usage: /export [n]")
+                source = self._export_input(int(arguments[0]) if arguments else 1)
+            except ValueError as exc:
+                await self.write_line(f"○ {exc}")
+                return
+            self._start_feature(self._export_operation(source))
             return
         if spec.available_phase > 1:
             await self.write_line(
@@ -1582,7 +1620,9 @@ class AxiomLMApp(App):
             except ValueError:
                 await usage()
                 return
-            completed = [turn for turn in self.turns if turn.record.phase == "DONE"]
+            completed = [
+                turn for turn in self.turns if turn.record.phase in {"DONE", "PRACTICE"}
+            ]
             if code:
                 blocks = [
                     block
@@ -1613,6 +1653,7 @@ class AxiomLMApp(App):
                 return
             await self.action_clear_chat()
             if name == "/new":
+                self._study_session_id = uuid4().hex
                 self._conversation.clear()
                 self._last_retrieved_pages.clear()
                 self._request_books.clear()
@@ -1769,7 +1810,245 @@ class AxiomLMApp(App):
         finally:
             self._deleting = False
 
+    async def _record_study_observation(self, record):
+        if record.phase != "DONE":
+            return
+        local = {
+            s.source_id
+            for s in record.sources
+            if s.kind == "book" and s.book == record.book
+        }
+        if not local:
+            return
+        try:
+            from .study_state import load_sections
+
+            catalog = await asyncio.to_thread(load_sections, record.book)
+            if (
+                not record.index_version
+                or record.index_version != catalog.index_version
+            ):
+                await self.write_line(
+                    "○ study observation unassigned: no consistent captured index version"
+                )
+                return
+            sections = [s for s in catalog.sections if local.intersection(s.chunk_ids)]
+            if not sections:
+                await self.write_line(
+                    "○ study observation unassigned: source section metadata unavailable"
+                )
+                return
+            await asyncio.to_thread(
+                self._study_store.record_question,
+                self._study_session_id,
+                record.request_id,
+                sections,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self.write_line(
+                f"○ study coverage unavailable; answer preserved: {exc}"
+            )
+
+    async def _study_command(self, name, arguments):
+        from .study_state import load_sections
+
+        if self._busy():
+            await self.write_line("○ work is active · /cancel or wait")
+            return
+        book, model = self.active_collection_name, self.selected_model
+        if not book:
+            await self.write_line("○ select a book with /book first")
+            return
+        try:
+            if (name == "/coverage" and arguments) or len(arguments) > 2:
+                raise ValueError(
+                    "usage: /practice [section-number] [count] or /coverage"
+                )
+            catalog = await asyncio.to_thread(load_sections, book)
+            if name == "/practice" and arguments:
+                number = int(arguments[0])
+                count = (
+                    int(arguments[1])
+                    if len(arguments) == 2
+                    else config.PRACTICE_DEFAULT_COUNT
+                )
+                if (
+                    not 1 <= number <= len(catalog.sections)
+                    or not 1 <= count <= config.PRACTICE_MAX_COUNT
+                ):
+                    raise ValueError("section number must be listed; count must be 1–5")
+                if model != config.OLLAMA_MODEL:
+                    raise ValueError(
+                        "Practice requires the calibrated configured model"
+                    )
+                section = catalog.sections[number - 1]
+                if (
+                    self._busy()
+                    or self.active_collection_name != book
+                    or self.selected_model != model
+                ):
+                    raise ValueError(
+                        "book/model changed or work started; repeat /practice"
+                    )
+                self._start_feature(self._practice_operation(section, count))
+                return
+            if name == "/coverage":
+                session = await asyncio.to_thread(
+                    self._study_store.counts,
+                    catalog.sections,
+                    session_id=self._study_session_id,
+                )
+                total = await asyncio.to_thread(
+                    self._study_store.counts, catalog.sections
+                )
+                await self.write_line(
+                    "Study coverage, not mastery. Counts reflect sections used as sources in completed answers."
+                )
+            for n, section in enumerate(catalog.sections, 1):
+                label = f"{n}. {section.chapter} · {section.section} · p. {collapse_page_ranges(list(section.physical_pages))}"
+                if name == "/coverage":
+                    label += f" · this session {session[section.section_id]} · all sessions {total[section.section_id]}"
+                    if total[section.section_id] == 0:
+                        label += " · Not yet asked about"
+                await self.write_line(label)
+            await self.write_line(
+                f"○ {catalog.unassigned_chunks} chunks have unassigned chapter/section metadata · index {catalog.index_version}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self.write_line(f"○ study unavailable: {exc}")
+
+    def _practice_operation(self, section, count):
+        async def operation(client):
+            from .chat_tokens import load_chat_counter
+            from .study import generate_practice
+
+            counter = await asyncio.to_thread(load_chat_counter, config.OLLAMA_MODEL)
+            result = await generate_practice(
+                section, count, client=client, counter=counter
+            )
+            refs = [
+                SourceRef(
+                    r.book_stem,
+                    chapter=r.chapter,
+                    section=r.section,
+                    physical_pages=r.physical_pages,
+                    source_id=r.source_id,
+                )
+                for r in result.sources
+            ]
+            numbers = {ref.source_id: n for n, ref in enumerate(refs, 1)}
+            lines = [
+                f"{n}. {q.text} [sources {', '.join(str(numbers[i]) for i in q.source_ids)}]"
+                for n, q in enumerate(result.questions, 1)
+            ]
+            record = TurnRecord(
+                uuid4().hex,
+                f"Practice: {section.chapter} · {section.section}",
+                section.book_stem,
+                config.OLLAMA_MODEL,
+                phase="PRACTICE",
+                sources=refs,
+                index_version=section.index_version,
+            )
+            record.set_answer("\n\n".join(lines))
+            view = TurnView(record)
+            self.turns.append(view)
+            self._hide_home()
+            await self.query_one(StudyStream).add_turn(view)
+            await view.finalize("PRACTICE")
+            await self.write_line(
+                "○ Practice questions generated; source links are not a semantic support guarantee. No coverage visit recorded."
+            )
+
+        return operation
+
+    def _export_input(self, number):
+        from .documents import ExportInput
+
+        completed = [turn.record for turn in self.turns if turn.record.phase == "DONE"]
+        if number < 1 or number > len(completed):
+            raise ValueError("no completed answer at that positive index")
+        record = completed[-number]
+        return ExportInput(
+            record.request_id,
+            record.book,
+            record.model,
+            record.copy_payload(),
+            record.citation_notice(),
+            tuple(record.sources),
+        )
+
+    def _start_feature(self, operation):
+        self._feature_worker = self.run_worker(
+            partial(self._run_feature, operation),
+            group="study-feature",
+            exit_on_error=False,
+        )
+
+    async def _run_feature(self, operation, token=None):
+        # Acquire inside the coroutine: a worker cancelled before start owns nothing.
+        token = token or self._try_acquire_workload("generation")
+        if token is None:
+            return
+        client = OllamaClient()
+        self._status = "○ preparing study output"
+        self._set_header()
+        needs_unload = True
+        try:
+            needs_unload = await operation(client) is not False
+        except asyncio.CancelledError:
+            await self.write_line(
+                "○ study operation cancelled · source answer preserved"
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self.write_line(f"✗ study operation failed: {exc}")
+        finally:
+            self._feature_cleaning = True
+            try:
+                if needs_unload:
+                    await asyncio.to_thread(client.unload_and_wait)
+            except Exception as exc:  # noqa: BLE001
+                await self.write_line(
+                    f"✗ cleanup unconfirmed; GPU work remains blocked: {exc}"
+                )
+            else:
+                self._release_workload(token)
+            self._feature_worker = None
+            self._feature_cleaning = False
+            self._status = "● ready" if not self._busy() else "○ cleanup blocked"
+            self._set_header()
+            self._update_hint()
+
+    def _export_operation(self, source):
+        async def operation(client):
+            from .chat_tokens import load_chat_counter
+            from .documents import export_document
+            from .typst_compile import compiler_capability
+
+            available, _ = await asyncio.to_thread(compiler_capability)
+            counter = (
+                await asyncio.to_thread(load_chat_counter, source.model)
+                if available
+                else None
+            )
+            result = await export_document(source, client=client, counter=counter)
+            path = result.pdf_path or result.text_path
+            await self.write_line(
+                f"○ export {result.status}: {path.resolve()}"
+                + (f" · {result.reason}" if result.reason else "")
+            )
+            return available
+
+        return operation
+
     def action_cancel_query(self):
+        if self._feature_worker:
+            if not self._feature_cleaning:
+                worker = self._feature_worker
+                worker.cancel()
+                if not worker.is_running:
+                    self._feature_worker = None
+            return
         if self._is_parsing:
             self._ingest_cancelled = True
             self.run_worker(
@@ -1984,7 +2263,9 @@ class AxiomLMApp(App):
 
     async def action_quit(self):
         self._restore_queued_prompt()
-        worker = self._active_query_worker
+        worker = self._feature_worker or self._active_query_worker
+        if self._feature_worker and not self._feature_cleaning:
+            self._feature_worker.cancel()
         if self._active_query_request_id:
             await self._cancel_active_query()
         self._ingest_cancelled = True
