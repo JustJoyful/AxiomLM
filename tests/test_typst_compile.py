@@ -4,6 +4,9 @@ import pytest
 
 from src import typst_compile as tc
 
+# A finite workload: Typst rejects constant/infinite while loops before execution.
+SLOW_TYPST = "#{ for i in range(10000) { for j in range(10000) { let n = i + j } } }"
+
 
 def test_command_isolated_and_paths_fixed(tmp_path, monkeypatch):
     monkeypatch.setattr(tc.shutil, "which", lambda name: "/usr/bin/" + name)
@@ -77,7 +80,7 @@ host = pytest.mark.skipif(
 @pytest.mark.asyncio
 async def test_timeout_kills_unit_and_next_compile_succeeds(tmp_path):
     assert tc.compiler_capability()[0], tc.compiler_capability()[1]
-    (tmp_path / "document.typ").write_text("#while true {}")
+    (tmp_path / "document.typ").write_text(SLOW_TYPST)
     result = await tc.compile_typst(tmp_path, remaining=0.5)
     assert result.status == "timeout"
     assert not (tmp_path / "document.pdf").exists()
@@ -121,7 +124,7 @@ async def test_compile_memory_and_file_limits(tmp_path, monkeypatch):
         return command(job, unit)
 
     monkeypatch.setattr(tc, "compiler_command", capture)
-    (tmp_path / "document.typ").write_text("#while true {}")
+    (tmp_path / "document.typ").write_text(SLOW_TYPST)
     task = asyncio.create_task(tc.compile_typst(tmp_path, remaining=10))
     state = {}
     try:
@@ -154,7 +157,7 @@ async def test_parent_death_has_bounded_cleanup(tmp_path):
     import sys
 
     assert tc.compiler_capability()[0], tc.compiler_capability()[1]
-    (tmp_path / "document.typ").write_text("#while true {}")
+    (tmp_path / "document.typ").write_text(SLOW_TYPST)
     # This real parent dies without executing Python cleanup; systemd owns the bound.
     script = """
 import asyncio, sys
