@@ -1,0 +1,484 @@
+"""Phase 4 per-book evaluation harness over frozen, hash-pinned label splits.
+
+Labels live in tests/fixtures/phase4/<book>_labels.json. Every label page is a
+one-based physical PDF page whose repaired text is pinned by sha256, so a page
+that changed after labeling is refused instead of silently shifting ground truth.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import math
+import shutil
+import sys
+import tempfile
+import time
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import patch
+
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.evaluate_phase3_baseline import (
+    digest,
+    exchanges_for,
+    finish,
+    identities,
+    page_metrics,
+    reserve,
+    tree_identity,
+)
+from scripts.validate_phase3_agent import _DISCLAIMER, premise_lints, sampling_record
+from src import config
+from src.agent import AgentRequest, run_agent
+from src.index_metadata import validate_book
+from src.page_querying import ABSTENTION
+from src.query_rewriting import rewrite_followup
+
+KINDS = frozenset(
+    {
+        "direct",
+        "followup",
+        "paraphrase",
+        "contradiction",
+        "unanswerable",
+        "page",
+        "broad",
+    }
+)
+SPLITS = ("calibration", "test")
+PIPELINES: tuple[str, ...] = ("baseline",)
+CODE = (
+    "src/agent.py",
+    "src/retrieval.py",
+    "src/hybrid_retrieval.py",
+    "scripts/evaluate_phase4.py",
+)
+
+
+def labels_path(book: str) -> Path:
+    validate_book(book)
+    return config.PHASE4_LABELS_DIR / f"{book}_labels.json"
+
+
+def _claim_pages(case: dict) -> list[int]:
+    return [p for claim in case["expected_claims"] for p in claim["source_pages"]]
+
+
+def _check_case(case: dict) -> None:
+    cid = case["case_id"]
+    if case["kind"] not in KINDS:
+        raise ValueError(f"case {cid}: unknown kind {case['kind']!r}")
+    if case["kind"] == "contradiction" and case["false_premise"] is not True:
+        raise ValueError(f"case {cid}: contradiction needs false_premise true")
+    if case["answerable"]:
+        if not case["relevant_pages"] or not case["expected_claims"]:
+            raise ValueError(
+                f"case {cid}: answerable case needs relevant pages and claims"
+            )
+        if any(not c["source_pages"] for c in case["expected_claims"]) or not set(
+            _claim_pages(case)
+        ) <= set(case["relevant_pages"]):
+            raise ValueError(f"case {cid}: claim pages must be nonempty relevant pages")
+    elif case["relevant_pages"] or case["expected_claims"]:
+        raise ValueError(f"case {cid}: unanswerable case has pages or claims")
+    elif case["kind"] != "unanswerable":
+        raise ValueError(f"case {cid}: only unanswerable cases may be unanswerable")
+
+
+def load_labels(path: Path, *, pages_root: Path = config.REPAIRED_MD) -> dict:
+    """Validated labels with hash-pinned Phase 2 cases merged in and a split per case."""
+    labels = json.loads(Path(path).read_text())
+    if labels.get("schema_version") != 1:
+        raise ValueError("unsupported label schema_version")
+    book = labels["book_stem"]
+    validate_book(book)
+    for case in labels["cases"]:
+        _check_case(case)
+    cases = []
+    reference = labels.get("phase2_reference")
+    if reference:
+        phase2_path = config.ROOT / reference["path"]
+        if digest(phase2_path) != reference["sha256"]:
+            raise ValueError(
+                "Phase 2 labels changed since the Phase 4 labels were frozen"
+            )
+        phase2 = {c["case_id"]: c for c in json.loads(phase2_path.read_text())["cases"]}
+        missing = sorted(set(reference["case_ids"]) - set(phase2))
+        if missing:
+            raise ValueError(f"Phase 2 reference names unknown cases {missing}")
+        # Hash-pinned Phase 2 cases keep their original kind and claims.
+        cases = [
+            {**phase2[cid], "false_premise": False} for cid in reference["case_ids"]
+        ]
+    cases += labels["cases"]
+    ids = [c["case_id"] for c in cases]
+    if len(ids) != len(set(ids)):
+        raise ValueError("duplicate case_id")
+    splits = labels["splits"]
+    if sorted(splits) != sorted(SPLITS):
+        raise ValueError(f"splits must be exactly {list(SPLITS)}")
+    calibration, test = set(splits["calibration"]), set(splits["test"])
+    if calibration & test:
+        raise ValueError(f"cases in both splits: {sorted(calibration & test)}")
+    if calibration | test != set(ids):
+        raise ValueError(
+            f"cases not in a split: {sorted(set(ids) - calibration - test)}; "
+            f"unknown split ids: {sorted(calibration | test - set(ids))}"
+        )
+    hashes = labels["source_pages"]
+    for page in sorted(
+        {p for c in cases for p in c["relevant_pages"] + _claim_pages(c)}
+    ):
+        if str(page) not in hashes:
+            raise ValueError(f"label page {page} has no hash")
+        source = Path(pages_root) / book / f"page_{page - 1:04d}.md"
+        if not source.is_file() or digest(source) != hashes[str(page)]:
+            raise ValueError(f"source page {page} changed")
+    for case in cases:
+        case["split"] = "calibration" if case["case_id"] in calibration else "test"
+    return {**labels, "cases": cases}
+
+
+def cases_for(labels: dict, split: str) -> list[dict]:
+    if split not in SPLITS:
+        raise ValueError(f"unknown split {split!r}")
+    return [c for c in labels["cases"] if c["split"] == split]
+
+
+def _rate(numerator: int, denominator: int) -> float | None:
+    """A zero denominator is unmeasured, never a measured 0.0."""
+    return numerator / denominator if denominator else None
+
+
+def retrieval_metrics(cases: list[dict], rows: list[dict]) -> dict:
+    rows = [{**r, "physical_pages": r["context_pages"]} for r in rows]
+    return {**page_metrics(cases, rows), "cutoff": "selected answer context"}
+
+
+def abstained(answer: str) -> bool:
+    return answer.startswith(ABSTENTION) or bool(_DISCLAIMER.search(answer))
+
+
+def answer_metrics(cases: list[dict], rows: list[dict]) -> dict:
+    """Missing or failed rows stay in every denominator; they never count as success."""
+    by_id = {r["case_id"]: r for r in rows}
+
+    def answer(case: dict) -> str | None:
+        row = by_id.get(case["case_id"])
+        if row is None or row["error"] is not None:
+            return None
+        return row["answer"] or ""
+
+    answerable = [c for c in cases if c["answerable"]]
+    unanswerable = [c for c in cases if not c["answerable"]]
+    premise = [c for c in cases if c["false_premise"]]
+    answered = sum(
+        answer(c) is not None
+        and by_id[c["case_id"]]["complete"]
+        and not abstained(answer(c))
+        for c in answerable
+    )
+    abstentions = sum(
+        answer(c) is not None and abstained(answer(c)) for c in unanswerable
+    )
+    rejected = sum(
+        answer(c) is not None and premise_lints(answer(c), c["question"]) == []
+        for c in premise
+    )
+    return {
+        "answerable": len(answerable),
+        "answered": answered,
+        "coverage": _rate(answered, len(answerable)),
+        "unanswerable": len(unanswerable),
+        "abstained": abstentions,
+        "abstention_rate": _rate(abstentions, len(unanswerable)),
+        "false_premise": len(premise),
+        "rejected": rejected,
+        "rejection_rate": _rate(rejected, len(premise)),
+        "heuristic": ["abstained", "rejected"],
+    }
+
+
+def claim_metrics(rows: list[dict]) -> dict:
+    judged = [r for r in rows if "claims" in r]
+    claims = [c for r in judged for c in r["claims"]]
+    citations = [c for r in judged for c in r.get("citations", [])]
+    unsupported = sum(not c["supported"] for c in claims)
+    supported = sum(c["supported"] for c in citations)
+    return {
+        "judged_rows": len(judged),
+        "unjudged_rows": len(rows) - len(judged),
+        "checked_claims": len(claims),
+        "unsupported_claims": unsupported,
+        "hallucination_rate": _rate(unsupported, len(claims)),
+        "checked_citations": len(citations),
+        "supported_citations": supported,
+        "citation_accuracy": _rate(supported, len(citations)),
+    }
+
+
+def expected_claim_recall(cases: list[dict], rows: list[dict]) -> dict:
+    """Expected claims whose label pages overlap a supporting source's pages."""
+    by_id = {r["case_id"]: r for r in rows}
+    expected = cited = 0
+    for case in cases:
+        row = by_id.get(case["case_id"], {})
+        sources = row.get("sources", [])
+        if "supporting_source_ids" in row:
+            keep = set(row["supporting_source_ids"])
+            sources = [s for s in sources if s["source_id"] in keep]
+        pages = {p for s in sources for p in s["pages"]}
+        # Behavioural claims without pages (e.g. "say the book does not cover it")
+        # cannot be cited, so they are outside this denominator.
+        for claim in case["expected_claims"]:
+            if claim["source_pages"]:
+                expected += 1
+                cited += bool(set(claim["source_pages"]) & pages)
+    return {
+        "expected_claims": expected,
+        "cited_expected": cited,
+        "supported_citation_recall": _rate(cited, expected),
+    }
+
+
+def _book_pages(sources) -> list[int]:
+    return sorted({p for s in sources if s.kind == "book" for p in s.physical_pages})
+
+
+async def run_case(case: dict, book: str, *, client, sandbox, counter) -> dict:
+    """One case through the unchanged agent path; any failure is kept in the row."""
+    history = list(case["history"])
+    row = {
+        "case_id": case["case_id"],
+        "split": case["split"],
+        "kind": case["kind"],
+        "question": case["question"],
+        "retrieval_query": None,
+        "context_pages": [],
+        "candidate_ids": [],
+        "answer": "",
+        "complete": False,
+        "abstained": False,
+        "sources": [],
+        "stage_seconds": {},
+        "model_requests": None,
+        "tool_calls": None,
+        "error": None,
+    }
+    started = time.monotonic()
+    try:
+        try:
+            # The frozen history goes through rewriting exactly as in Phase 3.
+            rewritten = await rewrite_followup(
+                case["question"],
+                exchanges_for(history, book),
+                book,
+                model=config.OLLAMA_MODEL,
+                client=client,
+            )
+            row["retrieval_query"] = rewritten.retrieval_query
+            request = AgentRequest(
+                f"phase4-{case['case_id']}",
+                case["question"],
+                book,
+                config.OLLAMA_MODEL,
+                history=tuple(history),
+                web_enabled=False,
+                retrieval_query=rewritten.retrieval_query,
+                today=datetime.now().astimezone().date().isoformat(),
+            )
+            async for event in run_agent(
+                request, client=client, sandbox=sandbox, counter=counter, web=None
+            ):
+                if event.kind == "step":
+                    row["stage_seconds"][event.data["stage"]] = (
+                        time.monotonic() - started
+                    )
+                elif event.kind == "sources":
+                    row["candidate_ids"] = [s.source_id for s in event.data["sources"]]
+                elif event.kind == "result":
+                    data = event.data
+                    row.update(
+                        answer=data["answer"],
+                        complete=data["complete"],
+                        abstained=abstained(data["answer"]),
+                        context_pages=_book_pages(data["sources"]),
+                        sources=[
+                            {
+                                "source_id": s.source_id,
+                                "kind": s.kind,
+                                "pages": list(s.physical_pages),
+                                "text": s.text,
+                            }
+                            for s in data["sources"]
+                        ],
+                        model_requests=data["model_requests"],
+                        tool_calls=data["tool_calls"],
+                    )
+                elif event.kind == "error":
+                    kind = event.data.get("kind", "error")
+                    row["error"] = f"Agent{kind.title()}: {event.data['message']}"
+        finally:
+            await asyncio.to_thread(client.unload_and_wait)
+    except Exception as exc:  # noqa: BLE001 - a failed case is a row, not a stop
+        row["error"] = row["error"] or f"{type(exc).__name__}: {exc}"
+    if row["error"] is not None:
+        row["complete"] = False
+    row["total_seconds"] = time.monotonic() - started
+    return row
+
+
+def _percentile(values: list[float], q: float) -> float | None:
+    """Nearest-rank percentile; None when nothing was timed."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(math.ceil(q * len(ordered)) - 1, 0)]
+
+
+def latency_metrics(rows: list[dict]) -> dict:
+    seconds = [r["total_seconds"] for r in rows]
+    return {
+        "n": len(seconds),
+        "p50": _percentile(seconds, 0.5),
+        "p95": _percentile(seconds, 0.95),
+        "max": max(seconds, default=None),
+    }
+
+
+@asynccontextmanager
+async def _services(report: dict):
+    """The Ollama client, chat counter and sandbox, wired as validate_phase3_agent does."""
+    from src.chat_tokens import load_chat_counter
+    from src.llm import OllamaClient
+    from src.sandbox.client import SandboxClient
+
+    client = OllamaClient()
+    counter = await asyncio.to_thread(load_chat_counter, config.OLLAMA_MODEL)
+    sandbox = SandboxClient(request_prefix="phase4-eval")
+    capability = await sandbox.start()
+    report["sandbox"] = {"available": capability.available, "reason": capability.reason}
+    try:
+        yield {"client": client, "sandbox": sandbox, "counter": counter}
+    finally:
+        await sandbox.aclose()
+
+
+async def _evaluate(report: dict, cases: list[dict], book: str, store: Path) -> None:
+    from src import index_store
+
+    resolve = index_store.resolve_index
+    with patch.object(
+        index_store, "resolve_index", lambda stem, **_: resolve(stem, root=store)
+    ):
+        handle = index_store.resolve_index(book)
+        report["index_version"] = {
+            "version_id": handle.version_id,
+            "legacy": handle.legacy,
+            "embedding_signature": handle.embedding_signature,
+        }
+        async with _services(report) as services:
+            for case in cases:
+                row = await run_case(case, book, **services)
+                report["rows"].append(row)
+                print(f"{case['case_id']}: {row['error'] or 'ok'}", flush=True)
+
+
+def evaluate(
+    book: str,
+    *,
+    split: str,
+    pipeline: str,
+    output: Path,
+    case_ids: list[str] | None = None,
+) -> dict:
+    if pipeline not in PIPELINES:
+        raise ValueError(f"unknown pipeline {pipeline!r}")
+    if split not in SPLITS:
+        raise ValueError(f"unknown split {split!r}")
+    path = labels_path(book)
+    stream = reserve(output)
+    report = {
+        "schema_version": 1,
+        "kind": "phase4_eval",
+        "status": "running",
+        "started_utc": datetime.now(UTC).isoformat(),
+        "book_stem": book,
+        "split": split,
+        "pipeline": pipeline,
+        "labels_path": str(path),
+        "labels_sha256": None,
+        "labels_review_status": None,
+        "sampling": None,
+        "index_version": None,
+        "rows": [],
+        "failures": [],
+        "metrics": None,
+    }
+    store_before = tree_identity(config.VECTOR_STORE)
+    try:
+        report["labels_sha256"] = digest(path)
+        labels = load_labels(path, pages_root=config.REPAIRED_MD)
+        if labels["book_stem"] != book:
+            raise ValueError("Labels are frozen for a different book")
+        report["labels_review_status"] = labels["review"]["status"]
+        cases = cases_for(labels, split)
+        if case_ids:
+            unknown = sorted(set(case_ids) - {c["case_id"] for c in cases})
+            if unknown:
+                raise ValueError(f"cases not in the {split} split: {unknown}")
+            cases = [c for c in cases if c["case_id"] in set(case_ids)]
+            report["case_subset"] = case_ids
+        report["sampling"] = sampling_record()
+        report.update(identities(CODE))
+        with tempfile.TemporaryDirectory(prefix="axiom-phase4-eval-") as temp:
+            store = Path(temp) / "vector_store"
+            shutil.copytree(config.VECTOR_STORE, store)
+            asyncio.run(_evaluate(report, cases, book, store))
+        rows = report["rows"]
+        report["failures"] = [
+            {"case_id": r["case_id"], "error": r["error"]} for r in rows if r["error"]
+        ]
+        report["metrics"] = {
+            "retrieval": retrieval_metrics(cases, rows),
+            "answer": answer_metrics(cases, rows),
+            "latency": latency_metrics(rows),
+        }
+        report["status"] = "complete"
+    except BaseException as exc:
+        report.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+        if not isinstance(exc, Exception):
+            raise
+    finally:
+        report["store_unchanged"] = tree_identity(config.VECTOR_STORE) == store_before
+        report["finished_utc"] = datetime.now(UTC).isoformat()
+        finish(stream, report)
+    return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("book")
+    parser.add_argument("--split", choices=SPLITS, required=True)
+    parser.add_argument("--pipeline", choices=PIPELINES, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cases", nargs="+", help="only these case ids")
+    args = parser.parse_args(argv)
+    report = evaluate(
+        args.book,
+        split=args.split,
+        pipeline=args.pipeline,
+        output=args.output,
+        case_ids=args.cases,
+    )
+    print(json.dumps({k: report.get(k) for k in ("status", "store_unchanged")}))
+    return 0 if report["status"] == "complete" and report["store_unchanged"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
