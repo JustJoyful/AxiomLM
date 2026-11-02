@@ -4,7 +4,7 @@
 
 ### Your Textbooks. Locally. Answered.
 
-A terminal study assistant for STEM and computer science textbooks, powered by local Ollama inference and book retrieval.
+A terminal study assistant for STEM and computer science textbooks: local OCR, hybrid book retrieval, a bounded tool-using agent with sandboxed math, and local Ollama inference.
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Runtime-Ollama-black?style=flat-square)
@@ -13,195 +13,206 @@ A terminal study assistant for STEM and computer science textbooks, powered by l
 
 </div>
 
-## Project status
-
-Phases 0 and 1 are accepted on the development host. The command-driven Textual interface passed automated and Kitty/Alacritty checks on Niri/Wayland, including maintainer-reported physical key, drag-selection and readability checks. Phase 2 is provisionally accepted by the maintainer for Phase 3 advancement (2026-10-23). Under the maintainer’s 2026-11-02 decisions, historical macro restoration is retired; retrieval closure awaits expanded labels and pooled test recall. Human reviews are recorded and nonblocking. This is not a measured retrieval-quality pass. Existing indexes remain in use until explicitly rebuilt. Phase 3 agent tools are accepted with documented limitations. Phase 4 is [provisionally accepted](docs/phase4-provisional-acceptance.md) for its harness and advisory citation-check plumbing; retrieval gating and live checks remain disabled. The ten-answer, selectively audited review records 7/63 factual errors (11.1%) and 1/2 false-premise rejections; it is not a general quality guarantee. Phase 5 is accepted under D3=RECORDED; practice/PDF human review is outstanding and nonblocking. Recorded live practice and Typst host evidence is retained. Phase 6 remains not accepted: retrieval closure awaits label expansion, and the laptop-plus-CPU portability scope still needs CPU fallback evidence. OCR/scanned-PDF processing is frozen.
-
-Core inference stays local with no silent cloud API fallback. Once models/dependencies are downloaded, the current book chat path can run offline. Planned web search/fetch are explicit evidence tools and require internet. A separate manually triggered Ask cloud button is optional, last, and outside core routing.
-
-## Available today
-
-- Command-driven Textual 8.2.6 study stream with live local Ollama output, cancellation and a one-question queue.
-- Per-book ChromaDB collections and Jina asymmetric retrieval embeddings.
-- Legacy indexes remain readable; explicit rebuilds use contextual chunks and versioned dense/BM25 pairs with physical-page spans.
-- Bounded follow-up rewriting, page-aware hybrid retrieval for rebuilt books, and metadata-derived source lists. Every retrieved source stays listed; experimental CPU entailment verdicts are available offline, with live checks disabled by default.
-- PDF engine selection, parse/index progress and resumable page checkpoints.
-- Seven built-in themes, settings-hidden retrieval controls, native selection, and `/copy` / `/copy code` via explicit clipboard transports.
-
-The configured target is **Qwen3.5-4B Q4_K_M**, using the exact Ollama tag `qwen3.5:4b-q4_K_M`. Phase 0 acceptance passed on the RTX 3050 6GB development machine: Ollama 0.40.4 tool-calling, GPU generation at the 4096-token context limit, unload, CUDA Jina ingestion/release, and CPU live-query placement have recorded evidence. The baseline comparison uses a retrospective reconstruction with truncated before answers, so answer-quality comparisons are directional. Maintainer-local status and evidence are recorded in PHASES.md and MEMORY.md; those files are not part of the public README distribution.
-
-## Screenshots
-
-Current Textual interface in the built-in Tokyo Night theme, captured directly from the app's renderer.
-
 ![AxiomLM home screen with command prompt and keyboard hints](docs/screenshots/tui-home.png)
 
-The study view replays a saved local answer, showing code and retrieved pages. Experimental scorer warnings are disabled by default.
+## Highlights
+
+- **Local first.** Inference runs on a local Ollama model (`qwen3.5:4b-q4_K_M`). There is no silent cloud fallback; once models are downloaded, book chat works offline. Web evidence is opt-in per question.
+- **Textbook ingestion.** PDF → Markdown with automatic engine routing (PyMuPDF4LLM for digital PDFs, MinerU for scans, Marker manually), resumable per-page checkpoints and physical-page provenance.
+- **Hybrid retrieval.** Versioned per-book indexes pair Jina dense embeddings (late chunking over ≤8192-token contextual blocks) with SQLite FTS5/BM25. Follow-up questions are rewritten from recent turns; page-targeted questions ("what does page 42 say") are handled directly.
+- **Bounded agent.** Every question searches the book first. Solve questions compute with SymPy inside a Bubblewrap/cgroups sandbox and are checked by a separate trusted symbolic verifier; unsupported checks are reported as *unverified* rather than solved.
+- **Study tools.** Source-linked practice questions per section, study coverage tracking, and Typst → PDF export of answers.
+- **Evaluation harness.** Labeled per-book retrieval/answer evaluation, an offline CPU entailment scorer, and before/after quality comparison tooling.
+- **Polished TUI.** Textual app with a command palette, one-question queue, cancellation, seven built-in themes plus custom themes, and reliable copy of answers and code blocks.
 
 ![AxiomLM study conversation with Python code and retrieved sources](docs/screenshots/tui-study.png)
 
-## Setup and use
+## Requirements
 
-Linux, Python 3.11+, and [uv](https://docs.astral.sh/uv/getting-started/installation/) are required. Install [Ollama](https://ollama.com/) and start its local service. The primary overhaul target is a Linux/Niri/Wayland laptop with an RTX 3050 6GB GPU and 16GB RAM. Runtime defaults, paths and tuning parameters live in `src/config.py`.
+- Linux, Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- [Ollama](https://ollama.com/) running locally (validated with Ollama 0.40.4)
+- A UTF-8 terminal, at least 40×12 cells (80×24 recommended)
+- Optional: `wl-clipboard` (Wayland copy), MinerU (scanned PDFs), Typst (PDF export), Bubblewrap + a user systemd manager with cgroups v2 (sandboxed Python and restricted Typst compilation), a self-hosted SearXNG instance (web evidence)
 
-Clone the project and run the installer. It syncs the pinned CUDA profile and development tools from `uv.lock`, then pulls the configured local Ollama model:
+The primary target is a laptop with an RTX 3050 6GB GPU and 16GB RAM. GPU OCR, embedding ingestion and LLM generation never overlap; live queries embed on CPU. A CPU-only install profile exists but CPU-only operation has not yet been fully validated.
+
+## Install and run
 
 ```bash
 git clone https://github.com/JustJoyful/AxiomLM.git
 cd AxiomLM
 bash install.sh
-source .venv/bin/activate
-uv run --no-sync python -m src.tui
+uv run --no-sync axiomlm          # or: uv run --no-sync python -m src.tui
 ```
 
-`install.sh` delegates to `scripts/setup_env.sh`. Use `--cpu` for the pinned CPU Torch profile, `--no-model` to skip both the pinned Jina snapshot download and Ollama model pull, and `--dry-run` to inspect all setup commands without changing the environment. Normal setup downloads the configured Jina revision and pulls the configured Ollama model. The sync preserves separately installed optional OCR engines. Use `uv run --no-sync axiomlm` to launch the installed entry point. `pyproject.toml` declares dependencies and `uv.lock` pins their resolved versions; the installer uses `uv`'s cache rather than staging multi-gigabyte CUDA wheels in `/tmp`.
+`install.sh` syncs the pinned CUDA profile from `uv.lock`, downloads the pinned Jina embedding revision and pulls the configured Ollama model. Options:
 
-The UI requires a UTF-8 interactive terminal, at least 40×12 cells (80×24 recommended). Install `wl-clipboard` for Wayland copying. Textual is pinned to 8.2.6. With the configured model, questions run through the Phase 3 agent (book search, sandboxed SymPy computation, trusted checks, optional web evidence); other models keep the Phase 2 path. Typst export requires a local compiler and the restricted systemd/Bubblewrap runtime; without them, export saves readable text. Physical compatibility across terminal applications has not yet been accepted.
+| Flag | Effect |
+| --- | --- |
+| `--cpu` | Use the pinned CPU Torch profile |
+| `--no-model` | Skip the Jina download and Ollama pull |
+| `--dry-run` | Print the setup commands without running them |
 
-### Parse and query a book
+Always run with `uv run --no-sync` (or activate `.venv`) so the chosen Torch profile and separately installed OCR engines stay intact. All runtime paths, model IDs, budgets and tuning parameters live in `src/config.py`.
 
-Use commands in the prompt, then type a question:
+## Usage
+
+Add a book, select it and ask a question:
 
 ```text
-/parse "/absolute/path/数学 notes.pdf" --mode auto
+/parse "/absolute/path/to/book.pdf" --mode auto
 /books
 /book book
-/models
-/model qwen3.5:4b-q4_K_M
+What is the substitution model of procedure application?
 ```
 
-`/parse` accepts `--mode auto|pymupdf4llm|mineru|marker` and explicit degraded `--cpu-embeddings`. Heavy engines require their installed runtime and sufficient hardware. MinerU is installed separately. Parsing a previously indexed book builds a replacement version; previous versions and parsed checkpoints remain retained.
+Parsing a book that is already indexed builds a replacement index version beside the old one and activates it only after validation; parsed checkpoints and previous versions are kept.
 
-Enter sends; Shift+Enter, Alt+Enter or Ctrl+J inserts a newline. Up/Down recalls history at the first/last line. Ctrl+P opens commands; Tab completes without executing. Escape closes an overlay first, otherwise cancels active work or clears the draft. PgUp/PgDn scroll; End resumes following output. Ctrl+L or `/clear` clears the display when idle; `/new` also clears conversation. Ctrl+C copies selected conversation or prompt text; Ctrl+Shift+C and Super+C also copy selections when delivered by the terminal. With no selection, `/quit` or two idle Ctrl+C presses exits.
+### Commands
 
-While generating, one additional question can queue with its captured book/model; book/model changes and destructive clearing are blocked until work resolves. Cancel/error returns the queued question to the prompt. Client abort is distinct from server unload: new GPU work stays blocked until cleanup is confirmed.
+| Command | Description |
+| --- | --- |
+| `/parse <path> [--mode auto\|pymupdf4llm\|mineru\|marker] [--cpu-embeddings]` | Parse and index a PDF |
+| `/books [filter]`, `/book <name>` | List / switch indexed books |
+| `/remove <book>` (`/delete`) | Remove a book after confirmation |
+| `/models`, `/model <name>` | List / switch Ollama models |
+| `/sources [n]`, `/details [n]` | Expand retrieved evidence / pipeline steps |
+| `/copy [n]`, `/copy code [n]` | Copy an answer (raw LaTeX) or its last fenced code block |
+| `/practice [section] [count]` | List sections, or generate 1–5 source-linked practice questions |
+| `/coverage` | Show which sections you have studied (session and all-time) |
+| `/export [n]` | Typeset an answer to PDF with Typst |
+| `/web on\|off\|show` | Per-question permission to fetch web evidence (off by default) |
+| `/thinking show` | Show the automatic thinking policy |
+| `/k <n>`, `/d <value>`, `/settings` | Retrieval count (3–15), distance cutoff, settings |
+| `/theme [name]`, `/accent <color>` | Preview/set theme, ANSI accent for the terminal theme |
+| `/retry`, `/cancel`, `/clear`, `/new`, `/quit` | Retry, cancel work, clear display, new conversation, exit |
+| `/gpu-parsing`, `/gpu-status` | Toggle / show the ingest embedding device |
 
-`/sources` expands retrieved page metadata; `/details` shows observed steps. `/copy` copies the last completed answer with raw LaTeX; `/copy code` copies the last fenced block without gutters or added indentation, preserving trailing blank lines. Optional positive `n` chooses the nth-last answer/block. Unsupported model footnotes and claim markers are removed; canonical refusals suppress continuation. Changed answer copies begin `[AxiomLM sanitized answer]`. Code remains exact. Wayland uses `wl-copy`; if it fails, an applicable native `xclip`/`xsel`/`pbcopy` transport is preferred over unacknowledged OSC 52. When only a terminal transport is available, the message says “OSC 52 copy requested” because terminal support cannot be confirmed. Controlled Wayland code/raw-LaTeX and Kitty OSC52 byte comparisons passed on the development host.
+### Keys
+
+| Key | Action |
+| --- | --- |
+| Enter | Send |
+| Shift+Enter, Alt+Enter, Ctrl+J | Newline |
+| Up / Down | History (at first/last line) |
+| Ctrl+P | Command palette; Tab completes without running |
+| Escape | Close overlay, else cancel active work, else clear draft |
+| PgUp / PgDn, End | Scroll, resume following output |
+| Ctrl+L | Clear display when idle |
+| Ctrl+C | Copy selection; twice when idle to exit |
+
+While an answer is generating, one more question can be queued. Book/model changes and destructive clears are blocked until work finishes; cancelling returns the queued question to the prompt.
 
 ### Themes and preferences
 
-`/theme` previews live; Enter keeps, Escape reverts. Built-ins: `terminal` (default), `mono`, `catppuccin-mocha`, `gruvbox-dark`, `nord`, `tokyo-night`, `paper`. `/accent cyan` selects an ANSI accent for terminal mode. Preferences live in `~/.config/axiomlm/config.toml`; custom theme TOML files live in `~/.config/axiomlm/themes/`. Saves preserve unrelated settings/comments atomically.
+Built-in themes: `terminal` (default), `mono`, `catppuccin-mocha`, `gruvbox-dark`, `nord`, `tokyo-night`, `paper`. `/theme` previews live (Enter keeps, Escape reverts). Preferences are saved in `~/.config/axiomlm/config.toml`; custom themes go in `~/.config/axiomlm/themes/`.
 
-`AXIOM_THEME` overrides the saved selection at startup; presence of `NO_COLOR` forces monochrome. `AXIOM_REDUCE_MOTION=1` or presence of `NO_MOTION` disables decorative motion. Terminal mode retains ANSI palette indexes; contrast depends on the terminal palette. Final Unicode math formatting waits until an active answer selection clears.
+Environment overrides: `AXIOM_THEME=<name>`, `NO_COLOR` (monochrome), `AXIOM_REDUCE_MOTION=1` or `NO_MOTION` (no decorative motion).
 
-`/help` lists commands. `/web on|off|show` grants or revokes per-question permission to retrieve web evidence; it is off by default, is locked while work is pending, and does nothing until a self-hosted SearXNG JSON endpoint is set as `WEB_SEARCH_URL` in `src/config.py`. Web access is retrieval only, never cloud inference. `/thinking show` reports the automatic policy (thinking on for the solve computation step, off for Q&A and for JSON/final turns, where measured thinking exhausted the output caps); it is not user-adjustable in Phase 3. `/export [n]` captures the nth-last completed answer (default 1) into a private `data/exports/<job>/` directory. It preserves `answer.txt`, notices and sources, requests raw Typst, and allows an initial compile plus at most two repairs. Missing Typst saves the original text without generation; failed compilation falls back to readable text. No viewer opens automatically. The restricted compiler requires Bubblewrap, cgroups v2 and a user systemd manager; Automated compiler host checks passed on the development host with Typst 0.15.1; live export/content review remains pending. The pinned CPU `cross-encoder/nli-deberta-v3-xsmall` remains available to offline evaluation and explicit experiments. `CITATION_CHECK_ENABLED = False` by default because its flags are too noisy; checks never remove page references or rewrite answers. The retrieval gate stays disabled because it failed calibration acceptance. `/practice` lists chapter/section numbers from an existing v2 index; `/practice <number> [count]` requests 1–5 source-linked questions (default 3) from whole section passages. Practice requests Ollama JSON output; invalid model JSON is rejected without a repair loop. Four live sets (10 questions) passed schema/source-ID checks; semantic support remains unreviewed. `/coverage` shows current-session and all-session asked counts for that book/index version. Study coverage, not mastery: counts reflect sections used as sources in completed answers. Practice generation does not add visits. `/new` starts a fresh coverage session; `/clear` preserves it. State lives separately in `data/study.sqlite3`; legacy/unknown metadata and storage failures leave ordinary chat usable.
+### Clipboard
 
-### Phase 3 agent
+Wayland uses `wl-copy`; otherwise `xclip`/`xsel`/`pbcopy` are tried before OSC 52. When only OSC 52 is available, AxiomLM reports "OSC 52 copy requested" because terminal support cannot be confirmed. Copied code is exact; answers that were cleaned up (unsupported footnotes or claim markers removed) start with `[AxiomLM sanitized answer]`.
 
-Every question first searches the selected book. Solve questions then compute with SymPy in the native sandbox and run a separate trusted symbolic check (substitution, derivative or equivalence over one real variable); unsupported or domain-sensitive checks stay *unverified* rather than being labelled solved. Web evidence is consulted only after a failed, unverified or disputed solve, or when the book evidence is judged insufficient for Q&A, and only with `/web on`. Book sources show chapter/page; web sources show `web: [title](url)`. Every model request is counted with a native-chat token counter calibrated for the exact configured model digest and Ollama 0.40.4, must fit beside its output reserve, and runs under caps of 6 model requests, 6 tool calls and one 120 s deadline. Proof scripts:
+### Web evidence
 
-```bash
-uv run --no-sync python scripts/probe_phase3_runtime.py --output data/logs/phase3_runtime/<new-run>/report.json
-uv run --no-sync python scripts/evaluate_phase3_baseline.py sicp --output data/logs/phase3_agent/<new-run>/before.json
-uv run --no-sync python scripts/validate_phase3_agent.py sicp --baseline <before.json> --output data/logs/phase3_agent/<new-run>/after.json
+Web search is retrieval only, never cloud inference. It requires a self-hosted SearXNG JSON endpoint set as `WEB_SEARCH_URL` in `src/config.py` and `/web on` for the question. The agent consults the web only after a failed or unverified solve, or when book evidence is insufficient. Fetches are SSRF-checked and pinned to public addresses.
+
+## How it works
+
+```text
+PDF ─▶ src/ocr.py ─▶ per-page checkpoints ─▶ full.md ─▶ src/indexer.py ─▶ versioned dense + BM25 index
+                                                                                    │
+question ─▶ query rewriting / page intent ─▶ hybrid retrieval ─▶ agent (search → solve/verify → web?) ─▶ Ollama ─▶ TUI
 ```
 
-All refuse to overwrite existing reports. Answer, citation and hallucination review stay unreviewed until attributed by a person.
+- **Extraction.** Auto-routing samples up to eight pages and picks MinerU when at least half look scanned. Checkpoints live in `data/parsed_md/checkpoints/<book>/page_NNNN.md` (zero-based); merged text in `data/parsed_md/<book>/full.md`. Cited pages are one-based physical PDF pages and may differ from printed page labels.
+- **Indexing.** Deterministic, non-overlapping contextual blocks embedded with Jina's `Document:`/`Query:` prefixes and late chunking. Each version is a dense (Chroma) + FTS5/BM25 pair activated through a single manifest. Older indexes stay readable until rebuilt.
+- **Retrieval.** Dense and BM25 results are fused deterministically (interleave by default; reciprocal rank fusion is available as an opt-in experiment) and whole passages are selected within a context budget calibrated for the configured model.
+- **Agent.** A deterministic state machine: classify → mandatory book search → local evidence assessment → solve (sandboxed SymPy + trusted check) → optional web → final answer. It is capped at 6 model requests, 6 tool calls and a 120 s deadline. Every request is token-counted with a native-chat counter that matches Ollama's Qwen3.5 renderer, so prompts always fit beside their output reserve. Other models use the simpler retrieval-and-answer path.
+- **Sandbox.** Fail-closed native Python under Bubblewrap with network isolation and cgroups v2: 250M shared memory, no swap, 32 processes, bounded scratch. Generated code never runs outside it; missing prerequisites disable execution.
+- **Trust signals.** Source lists show retrieved evidence, not verified citations. A pinned CPU NLI cross-encoder (`cross-encoder/nli-deberta-v3-xsmall`) is available for offline evaluation. Live citation checks (`CITATION_CHECK_ENABLED`) and the retrieval gate are off by default because they did not pass calibration.
 
-The CLI extraction/indexing path is:
-
-```bash
-uv run --no-sync python -m src.ocr --mode auto --pdf /absolute/path/to/book.pdf
-uv run --no-sync python -m src.indexer book
-```
-
-Replace `book` with the PDF stem. Existing collection replacement is explicit:
+### Command-line ingestion
 
 ```bash
-uv run --no-sync python -m src.indexer book --reindex
+uv run --no-sync python -m src.ocr --pdf /absolute/path/to/book.pdf --mode auto
+uv run --no-sync python -m src.indexer book            # book = PDF stem
+uv run --no-sync python -m src.indexer book --reindex  # build and activate a replacement version
 ```
 
-Reindexing builds a dense/BM25 pair beside previous versions and activates it after validation. Parsed artifacts and previous versions remain intact until confirmed removal. Staged evaluation has recorded a retrieval regression; review the local evidence before migrating an important book.
+## Project status
 
-### Existing OCR behavior (frozen)
+AxiomLM is developed in phases. Status as of November 2026:
 
-`src/ocr.py` is the unified entry point. PyMuPDF4LLM handles clean digital PDFs on CPU; MinerU handles scan-heavy PDFs with GPU batching/checkpoints; Marker remains a manual alternative for sufficiently capable hardware.
+| Phase | Scope | Status |
+| --- | --- | --- |
+| 0 — Foundation | Pinned model tag/digest, Ollama tool calling, GPU/CPU workload scheduling | Accepted |
+| 1 — Textual UI | Command-driven TUI, queueing, cancellation, themes, clipboard | Accepted (Kitty, Alacritty on Wayland) |
+| 2 — Context | Contextual blocks, late chunking, BM25 + dense hybrid search, follow-up rewriting | Provisionally accepted |
+| 3 — Tools | Book search, web search/fetch, sandboxed Python, trusted math checks | Accepted with known limitations |
+| 4 — Trust | Evaluation harness, CPU entailment scorer, advisory citation checks | [Provisionally accepted](docs/phase4-provisional-acceptance.md); live checks off |
+| 5 — Study | Practice questions, coverage, Typst export | Accepted; human content review pending |
+| 6 — Quality | [Quality tooling](docs/phase6-quality.md), RRF experiment, CPU portability | In progress |
 
-Auto-routing samples up to eight evenly spaced pages. It considers low extractable text and high image coverage, including image-heavy pages with an OCR text layer. MinerU is selected when at least half the samples are scan-like; thresholds and overrides remain in the existing code/configuration. Parse speed depends on the book, engine and hardware; old timing estimates are not guarantees.
+Known limitations:
 
-Checkpoints are stored in `data/parsed_md/checkpoints/<book_stem>/page_NNNN.md`, merged Markdown in `data/parsed_md/<book_stem>/full.md`, and vectors in `data/vector_store`. Checkpoint indices begin at zero; cited physical PDF pages begin at one and may differ from printed book labels.
-
-### Retrieval controls
-
-Use `/settings`, `/k 5` (3–15) and `/d 1.5` (finite, nonnegative) for actual retrieval count and distance filtering. Defaults come from `src/config.py`. The labeled SICP comparison preserved accepted K=8 IDs; configured K=5 increased precision from 0.542 to 0.600 and reduced recall from 0.778 to 0.694 over three labeled answerable cases. Fresh stochastic answers still included unsupported claims and page-1 under-answering. These settings do not provide a quality guarantee. Versioned hybrid retrieval is implemented under Phase 2 evaluation; Phase 4 live claim checking and its retrieval gate are disabled by default. The evaluation harness remains available.
-
-### Native Python sandbox validation
-
-The Phase 3 sandbox requires Linux Bubblewrap, a user systemd manager with writable cgroups v2 delegation, `cgroup.kill`, namespaces and native pidfd support. It enforces a shared 250M memory ceiling, no swap, 32 processes and bounded scratch; unavailable prerequisites disable execution. It never executes generated code outside the sandbox. SymPy 1.14.0 is pinned directly without changing Torch profiles.
-
-Run fixed adversarial diagnostics with a new output path:
-
-```bash
-uv run --no-sync python scripts/validate_python_sandbox.py --output data/logs/phase3_sandbox/<new-run>/report.json
-AXIOM_RUN_SANDBOX_HOST_TESTS=1 uv run --no-sync pytest -q tests/sandbox
-```
-
-Reports refuse overwrite. Ordinary tests explicitly skip host cases; those skips do not establish sandbox acceptance. Each call child moves itself into its request cgroup through a guard-opened descriptor (no numeric PID migration); descendant OOM is reported as an error, and guard death tears down the sandbox through the parent-death chain. The 2026-10-26 host report passed all required checks on the development host; independent review of that repair is pending. Chat tool routing remains unavailable until the separate native-chat, thinking and context gates pass.
-
-## Overhaul roadmap
-
-Build in order. Detailed acceptance criteria are in the maintainer's local `PRD.md`; the public scope summary is below.
-
-| Phase | Planned outcome |
-| --- | --- |
-| **0 — Foundation** | Exact Qwen3.5-4B Q4_K_M tag/digest; verified Ollama tool round-trip; GPU ingest, explicit release, CPU queries; local inference boundary |
-| **1 — Textual UI** | Accepted on Kitty 0.49.2 and Alacritty 0.17.0 on Niri/Wayland |
-| **2 — Context** | Chapter/section metadata, 8192-token non-overlapping contextual blocks and late chunking, follow-up rewriting, BM25 + dense search, direct 5–8 chunk synthesis |
-| **3 — Tools** | Local search, web search/fetch, sandboxed Python, PDF/citation tool interfaces; warm SymPy worker, verified solve flow and honest failure |
-| **4 — Trust** | One sub-100M CPU entailment model for gate/rank and citation checks; labeled per-book evaluation |
-| **5 — Study/documents** | Practice questions, coverage gaps, raw Typst → PDF with two retries maximum; optional flashcards |
-| **6 — Completion/portability** | [Quality tooling](docs/phase6-quality.md) delivered; retrieval closure not met, awaiting ≥30 labels/book and pooled test-recall evaluation; laptop CUDA + CPU-only scope, CPU fallback unverified; human reviews outstanding and nonblocking |
-
-Sandboxed Python uses Bubblewrap, network isolation and a cgroups v2 250M ceiling. The backend enforces a roughly 5s response deadline while preserving the warm worker; timeout cancellation and dead-worker recovery must be demonstrated before shipping.
-
-Time-boxed floor: **Phases 0–2 plus the Phase 4 eval harness**. Begin labels/baseline before pipeline changes. Phase 3 is the most ambitious/time-consuming addition. Phase 1 may be explicitly deferred; Phase 1 and Phase 5 are the first permitted cuts, and flashcards are lowest priority. The floor does not require full Phase 3 or the Phase 4 trust scorer. No OCR overhaul, cloud routing, Pyodide or iterative map-reduce.
+- Answers can still contain factual errors. A selectively audited 10-answer review found 7/63 factual errors (11.1%) and rejected 1 of 2 false premises; this is not a general quality guarantee.
+- Retrieval quality is still being measured; label expansion and pooled test-recall evaluation are pending. RRF improved one book and regressed another, so it is not the default.
+- CPU-only operation and terminals beyond Kitty/Alacritty are not yet validated.
+- Context budgeting and token counting are calibrated only for `qwen3.5:4b-q4_K_M` on Ollama 0.40.4; other models need recalibration.
 
 ## Repository map
 
 ```text
 src/
-  config.py          Runtime paths, models and tunable parameters
-  tui.py             Textual app and query/ingest orchestration
-  ui/                Stream, commands, themes, rendering and one axiom.tcss
-  db.py              ChromaDB and Jina embedding integration
-  agent.py           Phase 3 bounded routing state machine
-  chat_tokens.py     Native-chat token accounting for the validated model
-  retrieval.py       Shared adapter over Phase 2 hybrid retrieval
-  tools/             Tool schemas, registry, book/web tools, trusted math checks
-  sandbox/           Bubblewrap/cgroups native Python sandbox
-  indexer.py         Current chunking, metadata and indexing
-  clipboard.py       Explicit stdin/OSC 52 clipboard transports
-  ocr.py             Frozen extraction entry point
-  ocr_*.py           Frozen extraction engines
-  checkpoint.py      Frozen per-page artifacts
-  preprocessor.py    Frozen preprocessing
-scripts/             Setup, validation and per-book evaluation utilities
-data/                Local parsed artifacts, vector indexes and logs
-PRD.md               Product scope, build order and acceptance gates
-ARCHITECTURE.md      Current baseline and target implementation contracts
-RULES.md             Mandatory development constraints
-AGENTS.md            Coding-agent entry point and commands
+  config.py            Runtime paths, model IDs, budgets and tuning
+  tui.py, ui/          Textual app, commands, stream, prompt, themes, axiom.tcss
+  workloads.py         GPU/CPU admission control
+  llm.py               Ollama client (local only, keep_alive 0)
+  ocr.py, ocr_*.py     PDF extraction and engines (frozen)
+  checkpoint.py, preprocessor.py   Per-page artifacts and preprocessing (frozen)
+  text_repair.py       Downstream parsed-text repair
+  indexer.py, late_chunking.py, index_metadata.py, index_store.py, db.py
+                       Contextual chunking, provenance and versioned dense/BM25 stores
+  query_rewriting.py, page_querying.py, hybrid_retrieval.py, retrieval.py
+                       Query path and rank fusion
+  agent.py, chat_tokens.py, answer_tokens.py
+                       Agent state machine, token accounting, answer post-processing
+  tools/               Tool schemas, registry, book/web tools, trusted math checks
+  sandbox/             Bubblewrap/cgroups Python sandbox
+  entailment.py, citation_check.py   CPU NLI scorer and advisory citation checks
+  study.py, study_state.py, documents.py, typst_compile.py
+                       Practice, coverage and Typst export
+  clipboard.py         Clipboard transports
+scripts/               Setup, validation, probes and evaluation tools
+tests/                 Unit, TUI (pilot + snapshots) and sandbox host tests
+docs/                  Screenshots and phase reports
 ```
 
-## Contributing and verification
-
-When working in the maintainer's local workspace, read `AGENTS.md` and `RULES.md` before making changes. Those local documents, `PRD.md` and `ARCHITECTURE.md` are intentionally excluded from GitHub. The public phase summary above records the scope; contributors should confirm the applicable phase before implementation. Keep scope/status documentation aligned with actual code and preserve the frozen extraction pipeline. Runtime configuration belongs in `src/config.py`.
+## Development
 
 ```bash
-uv run --no-sync pytest -q
-uv run --no-sync ruff check src/ui src/tui.py src/clipboard.py src/llm.py scripts/validate_tui_phase1.py tests/tui
-uv run --no-sync python scripts/validate_tui_phase1.py
-uv run --no-sync python scripts/validate_tui_workload.py
+uv run --no-sync pytest -q                                     # full suite
+AXIOM_RUN_SANDBOX_HOST_TESTS=1 uv run --no-sync pytest -q tests/sandbox   # host sandbox cases
+uv run --no-sync --extra dev ruff check src/ scripts/
 uv run --no-sync --extra dev black --check src/
-uv run --no-sync python scripts/validate_page_metadata.py book
-uv run --no-sync python scripts/validate_page_querying.py book "sample question"
 ```
 
-The metadata validator requires an indexed book; the page-query validator checks parsing/citation and mounted TUI wiring offline. These checks cover the existing pipeline; they are not the planned labeled eval harness. Future pipeline changes require before/after retrieval precision/recall, citation accuracy and hallucination measurements. Use `type(scope): description` commit messages.
+Sandbox host tests are skipped by default; skips do not establish sandbox acceptance. `scripts/validate_*.py` and `scripts/evaluate_*.py` are acceptance and evaluation tools (TUI, page metadata/querying, Phase 2–6 checks, sandbox). Most write JSON reports and refuse to overwrite an existing path, so give each run a fresh `--output`, for example:
+
+```bash
+uv run --no-sync python scripts/validate_python_sandbox.py --output data/logs/phase3_sandbox/<new-run>/report.json
+uv run --no-sync python scripts/validate_phase2_context.py sicp
+```
+
+Contribution guidelines:
+
+- Keep runtime configuration in `src/config.py`; keep the local-only inference boundary.
+- The OCR engines, `checkpoint.py` and `preprocessor.py` are frozen; change callers or downstream indexing instead.
+- Index schema or embedding changes need a reindex plan that preserves parsed artifacts.
+- Retrieval or answer pipeline changes should come with before/after evaluation evidence.
+- Commit messages use `type(scope): description`.
 
 ## License
 
 MIT, as declared in `pyproject.toml`.
-
-
-Phase 2 local evaluation: `uv run --no-sync python scripts/validate_phase2_context.py sicp` uses a temporary index and writes a separate after-report, preserving the original baseline. It refuses to overwrite an existing after-report. Context budgeting is currently calibrated for the configured Qwen3.5 digest on Ollama 0.40.4; other model/runtime combinations require calibration. `/k` accepts 3–15, with 5–8 whole passages for broad queries when available.
