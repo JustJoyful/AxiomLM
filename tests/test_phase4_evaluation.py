@@ -446,6 +446,34 @@ async def test_followup_history_reaches_rewrite(monkeypatch):
     assert set(row["stage_seconds"]) == {"route"}
 
 
+async def test_run_case_retains_completion_reason_and_budget_trace(monkeypatch):
+    from src.agent import AgentEvent
+
+    _fake_agent(monkeypatch)
+    trace = [{"stage": "final", "counted_tokens": 2000, "output_reserve": 768}]
+
+    async def run_agent(request, **kwargs):
+        yield AgentEvent(
+            "result",
+            {
+                "answer": "Partial",
+                "complete": False,
+                "done_reason": "length",
+                "sources": [],
+                "model_requests": 3,
+                "tool_calls": 1,
+                "trace": trace,
+            },
+        )
+
+    monkeypatch.setattr(ev, "run_agent", run_agent)
+    row = await ev.run_case(
+        _followup_case(), "book", client=_Client(), sandbox=None, counter=None
+    )
+    assert row["done_reason"] == "length" and row["trace"] == trace
+    assert not row["complete"]
+
+
 def _eval_setup(tmp_path, monkeypatch, *, provenance=None):
     """A real one-book store built from repaired pages plus a valid label file."""
     from src import index_store
@@ -658,6 +686,7 @@ def test_check_timeouts_are_counted():
 async def test_rescore_judges_saved_sources_only(tmp_path, monkeypatch):
     import asyncio
     from types import SimpleNamespace
+
     from src import entailment, retrieval
 
     _eval_setup(tmp_path, monkeypatch)

@@ -361,6 +361,8 @@ async def run_case(case: dict, book: str, *, client, sandbox, counter) -> dict:
                     row.update(
                         answer=data["answer"],
                         complete=data["complete"],
+                        done_reason=data.get("done_reason"),
+                        trace=data.get("trace", []),
                         abstained=abstained(data["answer"]),
                         context_pages=_book_pages(data["sources"]),
                         sources=[
@@ -478,11 +480,15 @@ def evaluate(
     pipeline: str,
     output: Path,
     case_ids: list[str] | None = None,
+    merge_policy: str | None = None,
+    selection: dict | None = None,
 ) -> dict:
     if pipeline not in PIPELINES:
         raise ValueError(f"unknown pipeline {pipeline!r}")
     if split not in SPLITS:
         raise ValueError(f"unknown split {split!r}")
+    if merge_policy is not None and merge_policy not in {"interleave", "rrf"}:
+        raise ValueError("unknown merge policy")
     path = labels_path(book)
     stream = reserve(output)
     report = {
@@ -501,6 +507,8 @@ def evaluate(
         "rows": [],
         "failures": [],
         "metrics": None,
+        "merge_policy": merge_policy or config.HYBRID_MERGE_POLICY,
+        "selection": selection,
     }
     store_before = tree_identity(config.VECTOR_STORE)
     try:
@@ -530,7 +538,8 @@ def evaluate(
         with tempfile.TemporaryDirectory(prefix="axiom-phase4-eval-") as temp:
             store = Path(temp) / "vector_store"
             shutil.copytree(config.VECTOR_STORE, store)
-            asyncio.run(_evaluate(report, cases, book, store))
+            with patch.object(config, "HYBRID_MERGE_POLICY", report["merge_policy"]):
+                asyncio.run(_evaluate(report, cases, book, store))
         rows = report["rows"]
         report["failures"] = [
             {"case_id": r["case_id"], "error": r["error"]} for r in rows if r["error"]
