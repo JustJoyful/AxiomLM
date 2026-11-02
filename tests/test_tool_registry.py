@@ -188,6 +188,7 @@ def test_tool_message_quotes_status_and_data():
 
 async def test_verify_citation_supported(monkeypatch):
     from types import SimpleNamespace
+
     from src import entailment
     from src.tools.protocol import EvidenceRef
 
@@ -221,3 +222,42 @@ async def test_verify_citation_without_evidence_is_unavailable():
         "c", "verify_citation", {"claim": "claim", "source_id": "s"}, context()
     )
     assert result.status == "unavailable" and "evidence" in result.data["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_pdf_tool_reports_raw_fallback_as_text():
+    from src.tools.protocol import ToolResult
+
+    async def documents(arguments, context, call_id):
+        return ToolResult(
+            call_id, "generate_pdf", "ok", {"format": "text", "fallback": True}
+        )
+
+    result = await ToolRegistry(documents=documents).dispatch(
+        "pdf", "generate_pdf", {"request": "export"}, context()
+    )
+    assert result.status == "ok" and result.data == {"format": "text", "fallback": True}
+
+
+@pytest.mark.asyncio
+async def test_host_pdf_adapter_saves_real_fallback(tmp_path, monkeypatch):
+    from src import documents
+
+    monkeypatch.setattr(documents.config, "EXPORT_DIR", tmp_path)
+    monkeypatch.setattr(
+        documents, "compiler_capability", lambda: (False, "missing typst")
+    )
+    source = documents.ExportInput(
+        "turn", "sicp", "m", "Original answer", "unchecked", ()
+    )
+    handler = documents.document_handler(source, client=None, counter=None)
+    result = await ToolRegistry(documents=handler).dispatch(
+        "c", "generate_pdf", {"request": "format"}, context()
+    )
+    assert result.status == "ok"
+    assert result.data["format"] == "text" and result.data["fallback"] is True
+    assert result.data["pdf_path"] is None
+    assert (
+        __import__("pathlib").Path(result.data["text_path"]).read_text()
+        == "Original answer"
+    )

@@ -144,7 +144,7 @@ DESCRIPTIONS = {
     "web_search": "Search the web for public sources (only when book evidence is insufficient).",
     "fetch_page": "Fetch readable text from one public web page returned by web_search.",
     "execute_python": "Compute with SymPy in an isolated sandbox; assign the answer to `result`.",
-    "generate_pdf": "Generate a PDF document (unavailable until Phase 5).",
+    "generate_pdf": "Export a host-selected completed answer (requires a document handler).",
     "verify_citation": "Check whether one retrieved evidence source supports a claim.",
 }
 
