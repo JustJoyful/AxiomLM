@@ -14,7 +14,9 @@ def test_cli_index_unloads_ollama_before_starting_ingest(monkeypatch):
     monkeypatch.setattr(
         indexer,
         "index_book",
-        lambda book, reindex=False, allow_cpu_embeddings=False: events.append("indexed")
+        lambda book, reindex=False, allow_cpu_embeddings=False, **_: events.append(
+            "indexed"
+        )
         or 3,
     )
     assert indexer.main(["book"]) == 0
